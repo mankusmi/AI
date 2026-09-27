@@ -1,0 +1,4 @@
+role Viewer
+	modelPermission: read
+
+	tablePermission Sales = "[Region] = \"West\""

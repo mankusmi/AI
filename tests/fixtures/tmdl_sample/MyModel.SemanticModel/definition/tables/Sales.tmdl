@@ -1,0 +1,71 @@
+table Sales
+	lineageTag: 11111111-1111-1111-1111-111111111111
+
+	measure 'Total Sales' = SUM(Sales[Amount])
+		formatString: #,0
+		lineageTag: 22222222-2222-2222-2222-222222222222
+
+	measure 'Sales YTD' =
+			CALCULATE(
+				[Total Sales],
+				DATESYTD('Date'[Date])
+			)
+		formatString: #,0
+		lineageTag: 33333333-3333-3333-3333-333333333333
+
+	measure 'Margin Pct' = DIVIDE([Total Sales] - SUM(Sales[Cost]), [Total Sales])
+		formatString: 0.0%
+		lineageTag: 44444444-4444-4444-4444-444444444444
+
+	column OrderDateKey
+		dataType: int64
+		isHidden
+		lineageTag: 55555555-5555-5555-5555-555555555555
+		summarizeBy: none
+		sourceColumn: OrderDateKey
+
+		annotation SummarizationSetBy = Automatic
+
+	column Amount
+		dataType: double
+		lineageTag: 66666666-6666-6666-6666-666666666666
+		summarizeBy: sum
+		sourceColumn: Amount
+		formatString: #,0.00
+
+	column Cost
+		dataType: double
+		lineageTag: 77777777-7777-7777-7777-777777777777
+		summarizeBy: sum
+		sourceColumn: Cost
+
+	column 'Full Description' = Sales[ProductName] & " - " & Sales[Region]
+		dataType: string
+		lineageTag: 88888888-8888-8888-8888-888888888888
+		summarizeBy: none
+
+	column ProductName
+		dataType: string
+		lineageTag: 99999999-9999-9999-9999-999999999999
+		summarizeBy: none
+		sourceColumn: ProductName
+
+	column Region
+		dataType: string
+		lineageTag: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+		summarizeBy: none
+		sourceColumn: Region
+
+	column UnusedFlag
+		dataType: string
+		lineageTag: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
+		summarizeBy: none
+		sourceColumn: UnusedFlag
+
+	partition Sales = m
+		mode: import
+		source =
+				let
+					Source = Sql.Database("server", "db")
+				in
+					Source

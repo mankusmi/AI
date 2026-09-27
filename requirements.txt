@@ -1,0 +1,8 @@
+# Core TMDL/BIM profiling has no third-party dependencies (stdlib only).
+#
+# Install these only if you need --source live (Power BI REST API + AAD auth):
+requests>=2.28
+msal>=1.24
+
+# For running the test suite:
+pytest>=7.0
