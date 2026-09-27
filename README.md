@@ -16,6 +16,15 @@ Three ways to point it at a model:
 | `bim`  | A legacy `Model.bim` / TMSL JSON file (Analysis Services Tabular project, or a Tabular Editor export) | No (metadata only) |
 | `live` | A published dataset over the Power BI REST API (`executeQueries`, using DAX) | Yes |
 
+Optionally, it can also analyze the **report** layer (pages and visuals),
+either the modern PBIR project format or the legacy embedded layout, and
+cross-check which model fields those visuals actually use:
+
+| Report source | What it reads |
+|---|---|
+| `pbir` | A PBIP `<Name>.Report/definition/pages/**/visual.json` folder (Power BI Desktop project format) |
+| `legacy-layout` | A standalone, already-extracted legacy `Layout` JSON file (historically embedded as the `Report/Layout` part inside a `.pbix`) |
+
 ## Install
 
 Core (offline `tmdl`/`bim` profiling) needs nothing beyond the standard
@@ -47,8 +56,14 @@ pbi-profile profile --source live \
   --client-secret <secret>   # omit to fall back to an interactive device-code login
   --html
 
+# Also analyze the report's visuals (pages/visual field usage), and cross-check
+# which model fields those visuals actually reference
+pbi-profile profile --source tmdl --path ./MySemanticModel.SemanticModel \
+  --report-source pbir --report-path ./MyReport.Report --html
+
 # List the built-in best-practice rules
 pbi-profile list-rules
+pbi-profile list-report-rules
 ```
 
 Output goes to `--output` (default `./pbi_profile_output/`): always a
@@ -101,33 +116,57 @@ columns that aggregate (usually should be measures), isolated tables, empty
 calculation groups, naming issues, plus (live/data-profile only) empty
 tables, high null-rate columns, and columns that look like keys.
 
+**Report/visual profile** (`--report-source`/`--report-path` only): a page
+and visual inventory (visual type, title, hidden flag, distinct field count),
+plus every visual's field references resolved back to `table[field]` where
+possible. Feeding this in also **fixes the schema profile's biggest blind
+spot**: a column/measure referenced by a report visual but by no DAX
+expression is no longer flagged "unused" -- `unused-visible-column`/
+`unused-measure` see combined model+report usage whenever a report is
+supplied.
+
+**Report rules** (`pbi-profile list-report-rules`): visuals missing a title,
+empty pages, visuals using an unusually large number of distinct fields,
+likely duplicate visuals (same type + same fields on one page), and
+(cross-checked against the model) visual field references pointing at a
+table/column/measure that doesn't actually exist.
+
 ## Architecture
 
 ```
 pbi_profiler/
-  model.py            Backend-agnostic Model/Table/Column/Measure/... dataclasses
+  model.py             Backend-agnostic Model/Table/Column/Measure/... dataclasses
+  report_model.py      Backend-agnostic ReportModel/Page/Visual/FieldRef dataclasses
   loaders/
     tmdl_parser.py     Generic indentation-based TMDL tree parser
     tmdl_loader.py      -> Model, from a PBIP definition/ folder
     bim_loader.py        -> Model, from Model.bim / TMSL JSON
     live_loader.py        -> Model, from DAX INFO.VIEW.* queries; also the
                              PowerBiAuth/PowerBiRestClient used to run them
+  report_loaders/
+    _field_expr.py     Shared Column/Measure/Aggregation/HierarchyLevel + title parsing
+    pbir_loader.py      -> ReportModel, from a PBIR <Name>.Report/definition folder
+    legacy_layout_loader.py -> ReportModel, from a standalone legacy Layout JSON file
   profiling/
     dax_deps.py        Static "what references what" scan over model DAX
+                        (+ combine_usage() to merge in report-derived usage)
     schema.py          Metadata-level profile
     data.py            Data-level profile (needs a QueryExecutor)
-    rules.py           Best-practice rule engine
+    rules.py           Model best-practice rule engine
+    visuals.py         Report/visual inventory + usage_from_report()
+    report_rules.py    Report/visual best-practice rule engine
   report/html.py       Self-contained HTML report renderer
-  profile_runner.py    Wires loader -> profilers -> rules into one result
+  profile_runner.py    Wires loaders -> profilers -> rule engines into one result
   cli.py               `pbi-profile` command-line entry point
 ```
 
-Every loader implements the same `ModelLoader.load() -> Model` interface, so
-the profilers, rule engine and report never need to know which format the
-model came from. The live loader additionally exposes a `QueryExecutor`
-(`run_dax(query) -> rows`) that the data profiler uses -- and that tests
-fake out, so nothing in `profiling/` or `report/` needs network access or
-real Power BI credentials to test.
+Every model loader implements the same `ModelLoader.load() -> Model`
+interface (and every report loader the same `ReportLoader.load() ->
+ReportModel` interface), so the profilers, rule engines and report never
+need to know which format the model/report came from. The live loader
+additionally exposes a `QueryExecutor` (`run_dax(query) -> rows`) that the
+data profiler uses -- and that tests fake out, so nothing in `profiling/` or
+`report/` needs network access or real Power BI credentials to test.
 
 ## Tests
 
@@ -137,8 +176,9 @@ pytest
 ```
 
 Fixtures under `tests/fixtures/` include a small hand-built TMDL project and
-an equivalent `Model.bim`, so the two loaders' output can be cross-checked
-against each other.
+an equivalent `Model.bim` (so the two model loaders' output can be
+cross-checked against each other), plus a small PBIR report project and an
+equivalent legacy `Layout` JSON (same cross-check, for the report loaders).
 
 ## Known limitations
 
@@ -147,11 +187,21 @@ against each other.
   not the full language -- calculation groups are read but less exercised by
   tests, and things like translations/perspectives/shared expressions are
   not parsed.
-* "Unused" findings are a static, model-internal analysis only; they cannot
-  see report-level usage.
+* "Unused" findings are a static analysis: model DAX plus, when a report is
+  supplied, that report's visual field references. Usage in a *different*
+  report than the one passed in is still invisible.
 * The live loader's exact DAX `INFO.VIEW.*` column names are based on
   Microsoft's documented shape for these functions but haven't been
   exercised against a real tenant in this environment -- if a query comes
   back empty for a model where you expect data, check the warning it emits
   and adjust the DAX in `live_loader.py` to match what your engine version
   actually returns.
+* The PBIR/legacy-layout JSON shapes read by the report loaders (query
+  roles/projections, the Column/Measure/Aggregation/HierarchyLevel field
+  expressions, title objects) reflect the community-documented, empirically
+  stable structure rather than an official published schema -- reads are
+  defensive (an unrecognized visual/page is skipped, not fatal), but a field
+  reference form not covered by the fixtures here may come back empty rather
+  than resolved.
+* A visual's title is only read when it's a static string literal; a
+  dynamic (expression-bound) title comes back as no title.

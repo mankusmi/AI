@@ -1,0 +1,25 @@
+{
+  "sections": [
+    {
+      "name": "ReportSection1",
+      "displayName": "Page 1",
+      "visibility": 0,
+      "visualContainers": [
+        {
+          "x": 0,
+          "y": 0,
+          "width": 300,
+          "height": 200,
+          "config": "{\"name\": \"legacyVis1\", \"layouts\": [], \"singleVisual\": {\"visualType\": \"columnChart\", \"projections\": {\"Category\": [{\"queryRef\": \"Sales.Region\"}], \"Y\": [{\"queryRef\": \"Sum(Sales.Amount)\"}]}, \"prototypeQuery\": {\"From\": [{\"Name\": \"s\", \"Entity\": \"Sales\"}], \"Select\": [{\"Column\": {\"Expression\": {\"SourceRef\": {\"Source\": \"s\"}}, \"Property\": \"Region\"}, \"Name\": \"Sales.Region\"}, {\"Aggregation\": {\"Expression\": {\"Column\": {\"Expression\": {\"SourceRef\": {\"Source\": \"s\"}}, \"Property\": \"Amount\"}}, \"Function\": 0}, \"Name\": \"Sum(Sales.Amount)\"}]}, \"vcObjects\": {\"title\": [{\"properties\": {\"text\": {\"expr\": {\"Literal\": {\"Value\": \"'Sales by Region (legacy)'\"}}}}}]}}}"
+        },
+        {
+          "x": 0,
+          "y": 0,
+          "width": 300,
+          "height": 200,
+          "config": "{\"name\": \"legacyVis2\", \"layouts\": [], \"singleVisual\": {\"visualType\": \"slicer\", \"projections\": {\"Values\": [{\"queryRef\": \"Sales.UnknownCol\"}]}, \"prototypeQuery\": {\"From\": [{\"Name\": \"s\", \"Entity\": \"Sales\"}], \"Select\": [{\"Column\": {\"Expression\": {\"SourceRef\": {\"Source\": \"s\"}}, \"Property\": \"UnknownCol\"}, \"Name\": \"Sales.UnknownCol\"}]}, \"vcObjects\": {}}}"
+        }
+      ]
+    }
+  ]
+}

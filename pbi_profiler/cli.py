@@ -3,7 +3,14 @@
     pbi-profile profile --source tmdl --path ./MyModel.SemanticModel --html
     pbi-profile profile --source bim --path ./Model.bim
     pbi-profile profile --source live --workspace-id <guid> --dataset-id <guid> --tenant-id <guid> --client-id <guid>
+
+    # optionally, also analyze the report's visuals (pages/visual field usage,
+    # cross-checked against the model):
+    pbi-profile profile --source tmdl --path ./MyModel.SemanticModel \\
+        --report-source pbir --report-path ./MyReport.Report --html
+
     pbi-profile list-rules
+    pbi-profile list-report-rules
 """
 from __future__ import annotations
 
@@ -13,8 +20,9 @@ import sys
 from pathlib import Path
 
 from .loaders import BimModelLoader, LiveModelLoader, PowerBiAuth, PowerBiRestClient, TmdlModelLoader
+from .report_loaders import LegacyLayoutReportLoader, PbirReportLoader
 from .profile_runner import run_profile
-from .profiling import list_rules
+from .profiling import list_report_rules, list_rules
 from .report import render_html
 
 
@@ -51,6 +59,18 @@ def _build_loader(args):
     raise SystemExit(f"Unknown --source {args.source!r}")
 
 
+def _build_report_loader(args):
+    if not args.report_source:
+        return None
+    if not args.report_path:
+        raise SystemExit("--report-path is required when --report-source is given")
+    if args.report_source == "pbir":
+        return PbirReportLoader(args.report_path)
+    if args.report_source == "legacy-layout":
+        return LegacyLayoutReportLoader(args.report_path)
+    raise SystemExit(f"Unknown --report-source {args.report_source!r}")
+
+
 def cmd_profile(args) -> int:
     loader, executor = _build_loader(args)
     model = loader.load()
@@ -60,7 +80,10 @@ def cmd_profile(args) -> int:
     if args.no_data_profile:
         executor = None
 
-    result = run_profile(model, executor=executor)
+    report_loader = _build_report_loader(args)
+    report = report_loader.load() if report_loader is not None else None
+
+    result = run_profile(model, executor=executor, report=report)
 
     out_dir = Path(args.output) if args.output else Path(".")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -73,6 +96,11 @@ def cmd_profile(args) -> int:
         f"Tables: {result.schema.table_count}  Columns: {result.schema.column_count}  "
         f"Measures: {result.schema.measure_count}  Relationships: {result.schema.relationship_count}"
     )
+    if result.report is not None:
+        print(
+            f"Report: {result.report.report_name}  Pages: {result.report.page_count}  "
+            f"Visuals: {result.report.visual_count}"
+        )
     sev_counts: dict[str, int] = {}
     for f in result.findings:
         sev_counts[f.severity] = sev_counts.get(f.severity, 0) + 1
@@ -94,6 +122,13 @@ def cmd_list_rules(args) -> int:
     for rule in list_rules():
         data_flag = " (needs live data)" if rule["requires_data"] else ""
         print(f"[{rule['severity']:7}] {rule['id']:28} {rule['category']:15} {rule['name']}{data_flag}")
+    return 0
+
+
+def cmd_list_report_rules(args) -> int:
+    for rule in list_report_rules():
+        model_flag = " (needs model cross-check)" if rule["requires_model"] else ""
+        print(f"[{rule['severity']:7}] {rule['id']:28} {rule['category']:15} {rule['name']}{model_flag}")
     return 0
 
 
@@ -121,10 +156,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the data (row/null/distinct-count) profile even in --source live",
     )
+    p.add_argument(
+        "--report-source",
+        choices=["pbir", "legacy-layout"],
+        help="Also analyze a report's visuals: 'pbir' for a <Name>.Report/definition folder, "
+        "'legacy-layout' for a standalone extracted Layout JSON file",
+    )
+    p.add_argument("--report-path", help="Path to the report artifact named by --report-source")
     p.set_defaults(func=cmd_profile)
 
-    lr = sub.add_parser("list-rules", help="List the available best-practice rules")
+    lr = sub.add_parser("list-rules", help="List the available model best-practice rules")
     lr.set_defaults(func=cmd_list_rules)
+
+    lrr = sub.add_parser("list-report-rules", help="List the available report/visual best-practice rules")
+    lrr.set_defaults(func=cmd_list_report_rules)
 
     return parser
 
