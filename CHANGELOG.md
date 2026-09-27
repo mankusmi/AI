@@ -58,3 +58,43 @@ hierarchies, RLS roles):
 - `pyproject.toml` with a `pbi-profile` console-script entry point; core
   (`tmdl`/`bim`) profiling has no third-party dependencies, `[live]` adds
   `requests`/`msal` for the REST/AAD path.
+
+### Added — report/visual analysis (pages, visuals, field usage cross-check)
+
+Extends `pbi-profiler` to also analyze the **report** layer (pages and
+visuals), not just the semantic model, and to close the model profiler's
+"can't see report usage" blind spot.
+
+- `report_model.py` — backend-agnostic `ReportModel`/`Page`/`Visual`/
+  `FieldRef` dataclasses.
+- `report_loaders/` — two loaders producing a `ReportModel`:
+  - `PbirReportLoader` — parses a PBIP `<Name>.Report/definition/pages/**/
+    visual.json` folder (the modern report project format), extracting each
+    visual's type, title, and field references with their query role
+    (Category/Y/Values/etc.) straight from `queryState`.
+  - `LegacyLayoutReportLoader` — parses a standalone extracted legacy
+    `Layout` JSON file (the older single-blob report format), including
+    resolving the `Source` alias indirection in `prototypeQuery.From` back
+    to table names.
+  - `report_loaders/_field_expr.py` — the shared Column/Measure/Aggregation/
+    HierarchyLevel field-expression and title parsing both loaders use.
+- `profiling/visuals.py` — `compute_report_profile()` (page/visual
+  inventory: counts by visual type, per-page visual counts, per-visual field
+  counts) and `usage_from_report()` (a `UsageInfo` built from every visual's
+  field references).
+- `profiling/dax_deps.py` — new `combine_usage()` merges the model's own DAX
+  usage with `usage_from_report()`'s report usage, so `unused-visible-column`
+  / `unused-measure` no longer flag a column/measure that a report visual
+  actually uses but no DAX expression does.
+- `profiling/report_rules.py` — a 5-rule report-level engine, sharing the
+  same `Finding` shape as the model rule engine: visuals missing a title,
+  empty pages, visuals with an unusually high distinct field count, likely
+  duplicate visuals (same type + fields on one page), and — cross-checked
+  against the model — visual field references pointing at a table/column/
+  measure that doesn't exist.
+- `cli.py` — new `--report-source {pbir,legacy-layout}` / `--report-path`
+  flags on `profile` (both `profile.json` and, with `--html`, `report.html`
+  gain the report/visual data), and a new `list-report-rules` subcommand.
+- 18 more pytest tests (52 total) plus a small PBIR report fixture and an
+  equivalent legacy `Layout` JSON fixture, including one that demonstrates
+  the usage cross-check fixing a false "unused" positive.

@@ -1,0 +1,29 @@
+{
+  "name": "vis3",
+  "visual": {
+    "visualType": "slicer",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {"SourceRef": {"Entity": "Sales"}},
+                  "Property": "NotARealColumn"
+                }
+              },
+              "queryRef": "Sales.NotARealColumn"
+            }
+          ]
+        }
+      }
+    },
+    "objects": {
+      "title": [
+        {"properties": {"text": {"expr": {"Literal": {"Value": "'Region Filter'"}}}}}
+      ]
+    }
+  },
+  "isHidden": false
+}

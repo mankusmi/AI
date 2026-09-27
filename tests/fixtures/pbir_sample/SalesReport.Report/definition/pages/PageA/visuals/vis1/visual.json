@@ -1,0 +1,42 @@
+{
+  "name": "vis1",
+  "visual": {
+    "visualType": "columnChart",
+    "query": {
+      "queryState": {
+        "Category": {
+          "projections": [
+            {
+              "field": {
+                "Column": {
+                  "Expression": {"SourceRef": {"Entity": "Sales"}},
+                  "Property": "Region"
+                }
+              },
+              "queryRef": "Sales.Region"
+            }
+          ]
+        },
+        "Y": {
+          "projections": [
+            {
+              "field": {
+                "Measure": {
+                  "Expression": {"SourceRef": {"Entity": "Sales"}},
+                  "Property": "Total Sales"
+                }
+              },
+              "queryRef": "Sales.Total Sales"
+            }
+          ]
+        }
+      }
+    },
+    "objects": {
+      "title": [
+        {"properties": {"text": {"expr": {"Literal": {"Value": "'Sales by Region'"}}}}}
+      ]
+    }
+  },
+  "isHidden": false
+}

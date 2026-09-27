@@ -1,0 +1,30 @@
+{
+  "name": "vis2",
+  "visual": {
+    "visualType": "card",
+    "query": {
+      "queryState": {
+        "Values": {
+          "projections": [
+            {
+              "field": {
+                "Aggregation": {
+                  "Expression": {
+                    "Column": {
+                      "Expression": {"SourceRef": {"Entity": "Sales"}},
+                      "Property": "Cost"
+                    }
+                  },
+                  "Function": 0
+                }
+              },
+              "queryRef": "Sum(Sales.Cost)"
+            }
+          ]
+        }
+      }
+    },
+    "objects": {}
+  },
+  "isHidden": false
+}

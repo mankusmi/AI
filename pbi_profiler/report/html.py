@@ -103,6 +103,51 @@ def _data_profile_tables(data) -> str:
     return "\n".join(sections)
 
 
+def _report_section(report) -> str:
+    if report is None:
+        return "<section><h2>Report visuals</h2><p class='muted'>Not computed (no report was provided).</p></section>"
+
+    type_rows = "".join(
+        f"<tr><td><code>{escape(t)}</code></td><td>{n}</td></tr>"
+        for t, n in sorted(report.visuals_by_type.items(), key=lambda kv: -kv[1])
+    )
+    type_table = (
+        "<table><thead><tr><th>Visual type</th><th>Count</th></tr></thead>"
+        f"<tbody>{type_rows}</tbody></table>"
+    )
+
+    page_rows = "".join(
+        f"<tr><td><code>{escape(p.name)}</code></td><td>{escape(p.display_name or '')}</td>"
+        f"<td>{'yes' if p.is_hidden else ''}</td><td>{p.visual_count}</td></tr>"
+        for p in report.pages
+    )
+    pages_table = (
+        "<table><thead><tr><th>Page</th><th>Display name</th><th>Hidden</th>"
+        f"<th>Visuals</th></tr></thead><tbody>{page_rows}</tbody></table>"
+    )
+
+    visual_rows = "".join(
+        f"<tr><td><code>{escape(v.page)}</code></td><td><code>{escape(v.name)}</code></td>"
+        f"<td>{escape(v.visual_type or '')}</td><td>{escape(v.title or '')}</td>"
+        f"<td>{'yes' if v.is_hidden else ''}</td><td>{v.field_count}</td></tr>"
+        for v in report.visuals
+    )
+    visuals_table = (
+        "<table><thead><tr><th>Page</th><th>Visual</th><th>Type</th><th>Title</th>"
+        f"<th>Hidden</th><th>Fields used</th></tr></thead><tbody>{visual_rows}</tbody></table>"
+    )
+
+    return (
+        "<section><h2>Report visuals</h2>"
+        f"<p class='subtitle'>{escape(report.report_name)} &middot; source: {escape(report.source_kind)} &middot; "
+        f"{report.page_count} pages, {report.visual_count} visuals</p>"
+        f"<h3>Visual types</h3>{type_table}"
+        f"<h3>Pages</h3>{pages_table}"
+        f"<h3>Visuals</h3>{visuals_table}"
+        "</section>"
+    )
+
+
 def render_html(result: ProfileResult) -> str:
     schema = result.schema
     sev_counts = {"error": 0, "warning": 0, "info": 0}
@@ -122,6 +167,11 @@ def render_html(result: ProfileResult) -> str:
             _card(sev_counts["warning"], "Warnings"),
             _card(sev_counts["info"], "Info findings"),
         ]
+        + (
+            [_card(result.report.page_count, "Report pages"), _card(result.report.visual_count, "Report visuals")]
+            if result.report is not None
+            else []
+        )
     )
 
     data_section = ""
@@ -158,6 +208,8 @@ def render_html(result: ProfileResult) -> str:
 </section>
 
 {data_section}
+
+{_report_section(result.report)}
 
 </body>
 </html>

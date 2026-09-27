@@ -52,6 +52,17 @@ class UsageInfo:
         return name in self.referenced_measures
 
 
+def combine_usage(*usages: UsageInfo) -> UsageInfo:
+    """Merge multiple usage signals (e.g. the model's own DAX plus report
+    visual field references) into one. A column/measure counts as used if
+    *any* source says so."""
+    combined = UsageInfo()
+    for usage in usages:
+        combined.referenced_columns |= usage.referenced_columns
+        combined.referenced_measures |= usage.referenced_measures
+    return combined
+
+
 def analyze_model(model: Model) -> UsageInfo:
     measure_names = {m.name for m in model.all_measures()}
     columns_by_table = {t.name: {c.name for c in t.columns} for t in model.tables}
