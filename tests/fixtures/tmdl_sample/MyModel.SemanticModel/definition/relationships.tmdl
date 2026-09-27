@@ -1,0 +1,9 @@
+relationship 12121212-1212-1212-1212-121212121212
+	fromColumn: Sales.OrderDateKey
+	toColumn: Date.Date
+
+relationship 13131313-1313-1313-1313-131313131313
+	fromColumn: Sales.Region
+	toColumn: Date.MonthName
+	crossFilteringBehavior: bothDirections
+	isActive: false

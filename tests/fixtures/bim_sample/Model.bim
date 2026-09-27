@@ -1,0 +1,50 @@
+{
+  "name": "MyModel",
+  "compatibilityLevel": 1567,
+  "model": {
+    "culture": "en-US",
+    "tables": [
+      {
+        "name": "Sales",
+        "columns": [
+          {"name": "OrderDateKey", "dataType": "int64", "isHidden": true, "summarizeBy": "none", "sourceColumn": "OrderDateKey"},
+          {"name": "Amount", "dataType": "double", "summarizeBy": "sum", "sourceColumn": "Amount", "formatString": "#,0.00"},
+          {"name": "Cost", "dataType": "double", "summarizeBy": "sum", "sourceColumn": "Cost"},
+          {"name": "Full Description", "dataType": "string", "type": "calculated", "expression": "Sales[ProductName] & \" - \" & Sales[Region]", "summarizeBy": "none"},
+          {"name": "ProductName", "dataType": "string", "summarizeBy": "none", "sourceColumn": "ProductName"},
+          {"name": "Region", "dataType": "string", "summarizeBy": "none", "sourceColumn": "Region"},
+          {"name": "UnusedFlag", "dataType": "string", "summarizeBy": "none", "sourceColumn": "UnusedFlag"}
+        ],
+        "measures": [
+          {"name": "Total Sales", "expression": "SUM(Sales[Amount])", "formatString": "#,0"},
+          {"name": "Sales YTD", "expression": ["CALCULATE(", "\t[Total Sales],", "\tDATESYTD('Date'[Date])", ")"], "formatString": "#,0"},
+          {"name": "Margin Pct", "expression": "DIVIDE([Total Sales] - SUM(Sales[Cost]), [Total Sales])", "formatString": "0.0%"}
+        ],
+        "partitions": [
+          {"name": "Sales", "mode": "import"}
+        ]
+      },
+      {
+        "name": "Date",
+        "columns": [
+          {"name": "Date", "dataType": "dateTime", "isKey": true, "summarizeBy": "none", "sourceColumn": "Date", "formatString": "Long Date"},
+          {"name": "Year", "dataType": "int64", "summarizeBy": "none", "sourceColumn": "Year"},
+          {"name": "MonthName", "dataType": "string", "summarizeBy": "none", "sourceColumn": "MonthName"}
+        ],
+        "hierarchies": [
+          {"name": "Date Hierarchy", "levels": [{"name": "Year", "column": "Year"}, {"name": "Month", "column": "MonthName"}]}
+        ],
+        "partitions": [
+          {"name": "Date", "mode": "import"}
+        ]
+      }
+    ],
+    "relationships": [
+      {"name": "r1", "fromTable": "Sales", "fromColumn": "OrderDateKey", "toTable": "Date", "toColumn": "Date"},
+      {"name": "r2", "fromTable": "Sales", "fromColumn": "Region", "toTable": "Date", "toColumn": "MonthName", "crossFilteringBehavior": "bothDirections", "isActive": false}
+    ],
+    "roles": [
+      {"name": "Viewer", "modelPermission": "read", "tablePermissions": [{"name": "Sales", "filterExpression": "[Region] = \"West\""}]}
+    ]
+  }
+}

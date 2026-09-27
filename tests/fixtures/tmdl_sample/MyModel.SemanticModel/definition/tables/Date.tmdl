@@ -1,0 +1,36 @@
+table Date
+	lineageTag: cccccccc-cccc-cccc-cccc-cccccccccccc
+
+	column Date
+		dataType: dateTime
+		isKey
+		lineageTag: dddddddd-dddd-dddd-dddd-dddddddddddd
+		summarizeBy: none
+		sourceColumn: Date
+		formatString: Long Date
+
+	column Year
+		dataType: int64
+		lineageTag: eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee
+		summarizeBy: none
+		sourceColumn: Year
+
+	column MonthName
+		dataType: string
+		lineageTag: ffffffff-ffff-ffff-ffff-ffffffffffff
+		summarizeBy: none
+		sourceColumn: MonthName
+
+	hierarchy 'Date Hierarchy'
+		lineageTag: 10101010-1010-1010-1010-101010101010
+
+		level Year = Year
+		level Month = MonthName
+
+	partition Date = m
+		mode: import
+		source =
+				let
+					Source = Sql.Database("server", "db")
+				in
+					Source
