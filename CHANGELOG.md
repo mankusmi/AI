@@ -6,6 +6,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — dependency graph diagrams (`--dependency-graph`)
+
+Embeds two diagrams in `report.html` (and their raw edge data in
+`profile.json`), gated behind a new opt-in `--dependency-graph` flag:
+
+- `profiling/graph.py` — `build_measure_dependency_edges()` reuses the
+  existing DAX reference scanner (`dax_deps.find_references`) to build a
+  proper per-measure edge list (which measure references which other
+  measure by name), rather than the flat usage set `analyze_model` already
+  produces for the unused-object checks.
+- `report/graph_svg.py` — hand-rolled, dependency-free inline SVG rendering:
+  no JS, no vendored charting library (jsdelivr/unpkg are blocked in this
+  environment anyway, and self-hosting Mermaid would need the npm registry
+  and add 1-3MB per report). A layered left-to-right layout for the measure
+  DAG (DAX disallows circular measure references, so this is always a true
+  DAG; a defensive cycle guard keeps a malformed edge list from hanging
+  regardless), and a circular layout for the table relationship graph
+  (relationships aren't guaranteed acyclic/hierarchical). Parallel edges
+  between the same two nodes fan out as bezier curves instead of
+  overlapping; inactive relationships are dashed, bidirectional ones get
+  arrowheads at both ends, and cardinality is shown as an edge label when
+  known. Both `render_*_svg()` functions are pure and deterministic (sorted
+  iteration throughout), so they're covered by plain pytest string
+  assertions rather than needing a browser to verify.
+- `profile_runner.py` / `cli.py` / `report/html.py` — wired through as
+  `ProfileResult.dependency_graph`, `--dependency-graph`, and a new
+  "Dependency graphs" HTML section, following the same `None`-means-
+  "not computed" pattern already used for the data and report profiles.
+- 12 new tests (64 total) covering the edge-building logic against the
+  existing TMDL fixture (which already happens to have exactly the right
+  shape: two measures both referencing `Sales[Total Sales]`), SVG rendering
+  edge cases (empty input, inactive/bidirectional styling, cardinality
+  labels, parallel-edge fan-out, cycle safety, determinism), and a CLI
+  end-to-end run.
+
 ### Added — `pbi-profiler`: Power BI semantic model profiling tool
 
 A new Python package (`pbi_profiler/`) plus `pbi-profile` CLI for profiling

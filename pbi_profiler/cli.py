@@ -83,7 +83,9 @@ def cmd_profile(args) -> int:
     report_loader = _build_report_loader(args)
     report = report_loader.load() if report_loader is not None else None
 
-    result = run_profile(model, executor=executor, report=report)
+    result = run_profile(
+        model, executor=executor, report=report, include_dependency_graph=args.dependency_graph
+    )
 
     out_dir = Path(args.output) if args.output else Path(".")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +102,11 @@ def cmd_profile(args) -> int:
         print(
             f"Report: {result.report.report_name}  Pages: {result.report.page_count}  "
             f"Visuals: {result.report.visual_count}"
+        )
+    if result.dependency_graph is not None:
+        print(
+            f"Dependency graph: {len(result.dependency_graph.measure_edges)} measure edges, "
+            f"{len(result.dependency_graph.relationships)} relationships"
         )
     sev_counts: dict[str, int] = {}
     for f in result.findings:
@@ -163,6 +170,12 @@ def build_parser() -> argparse.ArgumentParser:
         "'legacy-layout' for a standalone extracted Layout JSON file",
     )
     p.add_argument("--report-path", help="Path to the report artifact named by --report-source")
+    p.add_argument(
+        "--dependency-graph",
+        action="store_true",
+        help="Also compute measure-dependency and table-relationship graphs; with --html, "
+        "embeds them as SVG diagrams in report.html",
+    )
     p.set_defaults(func=cmd_profile)
 
     lr = sub.add_parser("list-rules", help="List the available model best-practice rules")
