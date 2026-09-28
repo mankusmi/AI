@@ -6,6 +6,7 @@ from __future__ import annotations
 from html import escape
 
 from ..profile_runner import ProfileResult
+from .graph_svg import render_measure_dependency_svg, render_relationship_svg
 
 _SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
 
@@ -36,6 +37,14 @@ tr:hover td { background: color-mix(in srgb, CanvasText 6%, transparent); }
 section { margin-bottom: 2.5rem; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
 .muted { color: GrayText; }
+.dep-graph { max-width: 100%; height: auto; display: block; margin-bottom: 1rem; }
+.dep-node rect { fill: color-mix(in srgb, CanvasText 6%, Canvas); stroke: color-mix(in srgb, CanvasText 40%, transparent); stroke-width: 1.2; }
+.dep-node text { fill: CanvasText; font-size: 12px; font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+.dep-edge { stroke: color-mix(in srgb, CanvasText 45%, transparent); stroke-width: 1.4; }
+.dep-edge-inactive { stroke-dasharray: 5 4; }
+.dep-label-bg { fill: Canvas; }
+.dep-label { fill: GrayText; font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+marker path { fill: color-mix(in srgb, CanvasText 45%, transparent); }
 """
 
 
@@ -148,6 +157,30 @@ def _report_section(report) -> str:
     )
 
 
+def _dependency_graph_section(graph) -> str:
+    if graph is None:
+        return (
+            "<section><h2>Dependency graphs</h2>"
+            "<p class='muted'>Not computed (pass --dependency-graph to include).</p></section>"
+        )
+
+    relationship_svg = render_relationship_svg(graph.relationships)
+    relationship_html = relationship_svg or "<p class='muted'>No relationships.</p>"
+
+    measure_svg = render_measure_dependency_svg(graph.measure_edges)
+    measure_html = (
+        measure_svg
+        or "<p class='muted'>No measure-to-measure dependencies found (no measure's DAX references another measure by name).</p>"
+    )
+
+    return (
+        "<section><h2>Dependency graphs</h2>"
+        f"<h3>Table relationships</h3>{relationship_html}"
+        f"<h3>Measure dependencies</h3>{measure_html}"
+        "</section>"
+    )
+
+
 def render_html(result: ProfileResult) -> str:
     schema = result.schema
     sev_counts = {"error": 0, "warning": 0, "info": 0}
@@ -210,6 +243,8 @@ def render_html(result: ProfileResult) -> str:
 {data_section}
 
 {_report_section(result.report)}
+
+{_dependency_graph_section(result.dependency_graph)}
 
 </body>
 </html>

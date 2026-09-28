@@ -61,6 +61,10 @@ pbi-profile profile --source live \
 pbi-profile profile --source tmdl --path ./MySemanticModel.SemanticModel \
   --report-source pbir --report-path ./MyReport.Report --html
 
+# Also embed measure-dependency and table-relationship diagrams in the HTML report
+pbi-profile profile --source tmdl --path ./MySemanticModel.SemanticModel \
+  --dependency-graph --html
+
 # List the built-in best-practice rules
 pbi-profile list-rules
 pbi-profile list-report-rules
@@ -131,6 +135,22 @@ likely duplicate visuals (same type + same fields on one page), and
 (cross-checked against the model) visual field references pointing at a
 table/column/measure that doesn't actually exist.
 
+**Dependency graphs** (`--dependency-graph`; embedded as diagrams in
+`report.html` with `--html`, always included in `profile.json` when the flag
+is passed): a **measure dependency graph** (an edge means one measure's DAX
+references another measure by name -- scoped to measures only, not the
+columns they touch, to stay legible) and a **table relationship graph**
+(every table-to-table relationship, dashed for inactive, double-arrowed for
+bidirectional, labeled with cardinality when known). Both are rendered as
+plain inline SVG -- no JavaScript, no vendored charting library, nothing
+fetched over the network -- computed with a small hand-rolled layout (layered
+left-to-right for the measure DAG since DAX disallows circular measure
+references; a simple circular placement for relationships, since those
+aren't guaranteed acyclic). A table with no relationships, or a measure that
+references no other measure, simply doesn't appear in its diagram; that's
+not a bug, it's the same signal the `isolated-table`/`unused-measure` rules
+already surface elsewhere.
+
 ## Architecture
 
 ```
@@ -155,7 +175,10 @@ pbi_profiler/
     rules.py           Model best-practice rule engine
     visuals.py         Report/visual inventory + usage_from_report()
     report_rules.py    Report/visual best-practice rule engine
-  report/html.py       Self-contained HTML report renderer
+    graph.py           Measure dependency edges (reuses dax_deps.find_references)
+  report/
+    html.py            Self-contained HTML report renderer
+    graph_svg.py        Hand-rolled inline-SVG rendering for the dependency diagrams
   profile_runner.py    Wires loaders -> profilers -> rule engines into one result
   cli.py               `pbi-profile` command-line entry point
 ```

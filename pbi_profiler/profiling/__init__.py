@@ -10,6 +10,7 @@ from .visuals import (
     usage_from_report,
 )
 from .report_rules import ReportRule, ALL_REPORT_RULES, run_report_rules, list_report_rules
+from .graph import MeasureDependencyEdge, DependencyGraph, build_measure_dependency_edges
 
 __all__ = [
     "UsageInfo",
@@ -36,4 +37,7 @@ __all__ = [
     "ALL_REPORT_RULES",
     "run_report_rules",
     "list_report_rules",
+    "MeasureDependencyEdge",
+    "DependencyGraph",
+    "build_measure_dependency_edges",
 ]

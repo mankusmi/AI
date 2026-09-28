@@ -13,12 +13,14 @@ from .model import Model
 from .report_model import ReportModel
 from .profiling import (
     DataProfile,
+    DependencyGraph,
     Finding,
     ReportProfile,
     Rule,
     ReportRule,
     SchemaProfile,
     analyze_model,
+    build_measure_dependency_edges,
     combine_usage,
     compute_data_profile,
     compute_report_profile,
@@ -37,6 +39,7 @@ class ProfileResult:
     schema: SchemaProfile
     data: Optional[DataProfile]
     report: Optional[ReportProfile]
+    dependency_graph: Optional[DependencyGraph]
     findings: list[Finding]
 
     def to_dict(self) -> dict[str, Any]:
@@ -47,6 +50,7 @@ class ProfileResult:
             "schema": self.schema.to_dict(),
             "data": self.data.to_dict() if self.data else None,
             "report": self.report.to_dict() if self.report else None,
+            "dependency_graph": self.dependency_graph.to_dict() if self.dependency_graph else None,
             "findings": [f.to_dict() for f in self.findings],
         }
 
@@ -57,6 +61,7 @@ def run_profile(
     report: Optional[ReportModel] = None,
     rules: Optional[list[Rule]] = None,
     report_rules: Optional[list[ReportRule]] = None,
+    include_dependency_graph: bool = False,
 ) -> ProfileResult:
     model_usage = analyze_model(model)
     usage = combine_usage(model_usage, usage_from_report(report)) if report is not None else model_usage
@@ -71,6 +76,13 @@ def run_profile(
         report_profile = compute_report_profile(report)
         findings.extend(run_report_rules(report, model=model, rules=report_rules))
 
+    dependency_graph: Optional[DependencyGraph] = None
+    if include_dependency_graph:
+        dependency_graph = DependencyGraph(
+            measure_edges=build_measure_dependency_edges(model),
+            relationships=model.relationships,
+        )
+
     return ProfileResult(
         model_name=model.name,
         source_kind=model.source_kind,
@@ -78,5 +90,6 @@ def run_profile(
         schema=schema,
         data=data,
         report=report_profile,
+        dependency_graph=dependency_graph,
         findings=findings,
     )

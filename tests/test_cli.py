@@ -74,6 +74,44 @@ def test_cli_profile_with_report_analysis(tmp_path):
     assert "SalesReport" in html
 
 
+def test_cli_profile_with_dependency_graph(tmp_path):
+    out_dir = tmp_path / "out"
+    rc = main(
+        [
+            "profile",
+            "--source",
+            "tmdl",
+            "--path",
+            str(TMDL_SAMPLE),
+            "--dependency-graph",
+            "--html",
+            "--output",
+            str(out_dir),
+        ]
+    )
+    assert rc == 0
+
+    data = json.loads((out_dir / "profile.json").read_text())
+    graph = data["dependency_graph"]
+    assert {(e["from_measure"], e["to_measure"]) for e in graph["measure_edges"]} == {
+        ("Sales[Margin Pct]", "Sales[Total Sales]"),
+        ("Sales[Sales YTD]", "Sales[Total Sales]"),
+    }
+    assert len(graph["relationships"]) == 2
+
+    html = (out_dir / "report.html").read_text()
+    assert "Dependency graphs" in html
+    assert "<svg" in html
+
+
+def test_cli_profile_without_dependency_graph_flag_omits_it(tmp_path):
+    out_dir = tmp_path / "out"
+    rc = main(["profile", "--source", "tmdl", "--path", str(TMDL_SAMPLE), "--output", str(out_dir)])
+    assert rc == 0
+    data = json.loads((out_dir / "profile.json").read_text())
+    assert data["dependency_graph"] is None
+
+
 def test_cli_list_rules_runs(capsys):
     rc = main(["list-rules"])
     assert rc == 0
