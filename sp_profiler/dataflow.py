@@ -17,10 +17,30 @@ CREATE TABLE IF NOT EXISTS dataflow_entities (
     dataflow_id VARCHAR, entity VARCHAR, description VARCHAR, m_query VARCHAR, partitions INTEGER);
 CREATE TABLE IF NOT EXISTS dataflow_attributes (
     dataflow_id VARCHAR, entity VARCHAR, position INTEGER, name VARCHAR, data_type VARCHAR, description VARCHAR);
+CREATE TABLE IF NOT EXISTS dataflow_queries (
+    dataflow_id VARCHAR, name VARCHAR, is_entity BOOLEAN, m_query VARCHAR);
+-- kind 'attribute': target is a dataflow attribute; 'input': target is a column the Power Query steps read
 CREATE TABLE IF NOT EXISTS column_mappings (
-    entity VARCHAR, layout_hash VARCHAR, norm_header VARCHAR, attribute VARCHAR,
-    updated_utc TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (entity, layout_hash, norm_header));
+    entity VARCHAR, layout_hash VARCHAR, norm_header VARCHAR, attribute VARCHAR, kind VARCHAR DEFAULT 'attribute',
+    updated_utc TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (entity, layout_hash, norm_header, kind));
+CREATE TABLE IF NOT EXISTS entity_transforms (
+    entity VARCHAR PRIMARY KEY, dataflow_id VARCHAR, use_m BOOLEAN, override_sql VARCHAR,
+    accept_partial BOOLEAN DEFAULT FALSE, extra_inputs VARCHAR[], updated_utc TIMESTAMPTZ DEFAULT now());
+CREATE TABLE IF NOT EXISTS query_bindings (
+    dataflow_id VARCHAR, query_name VARCHAR, table_name VARCHAR, PRIMARY KEY (dataflow_id, query_name));
 """
+
+
+def migrate(con) -> None:
+    """Upgrade databases created before ``column_mappings.kind`` existed."""
+    cols = [r[0] for r in con.execute("SELECT column_name FROM information_schema.columns "
+                                      "WHERE table_name = 'column_mappings'").fetchall()]
+    if cols and "kind" not in cols:
+        con.execute("ALTER TABLE column_mappings RENAME TO column_mappings_old")
+        con.execute(DATAFLOW_DDL)
+        con.execute("INSERT INTO column_mappings (entity, layout_hash, norm_header, attribute, kind, updated_utc) "
+                    "SELECT entity, layout_hash, norm_header, attribute, 'attribute', updated_utc FROM column_mappings_old")
+        con.execute("DROP TABLE column_mappings_old")
 
 
 def parse_model_json(raw: bytes | str) -> dict:
@@ -33,6 +53,7 @@ def parse_model_json(raw: bytes | str) -> dict:
     if not isinstance(doc, dict) or not isinstance(doc.get("entities"), list):
         raise ValueError("Not a dataflow model.json (no 'entities' array)")
     queries = extract_m_queries((doc.get("pbi:mashup") or {}).get("document", ""))
+    entity_names = {e.get("name") for e in doc["entities"] if isinstance(e, dict)}
     entities = []
     for e in doc["entities"]:
         if not isinstance(e, dict) or "name" not in e:
@@ -47,7 +68,8 @@ def parse_model_json(raw: bytes | str) -> dict:
         raise ValueError("Dataflow contains no entities")
     return {"name": doc.get("name", ""), "description": doc.get("description", ""),
             "culture": doc.get("culture", ""), "modified_time": doc.get("modifiedTime", ""),
-            "entities": entities, "sha": hashlib.sha256(text.encode()).hexdigest()}
+            "entities": entities, "queries": queries, "entity_names": entity_names,
+            "sha": hashlib.sha256(text.encode()).hexdigest()}
 
 
 def extract_m_queries(document: str) -> dict[str, str]:
@@ -75,6 +97,8 @@ def store_dataflow(con, parsed: dict, source_file: str = "") -> tuple[str, bool]
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     [dataflow_id, parsed["name"], parsed["description"], parsed["culture"],
                      parsed["modified_time"], source_file, json.dumps({"entities": [e["name"] for e in parsed["entities"]]})])
+        con.executemany("INSERT INTO dataflow_queries VALUES (?, ?, ?, ?)",
+                        [[dataflow_id, n, n in parsed["entity_names"], m] for n, m in parsed["queries"].items()])
         for e in parsed["entities"]:
             con.execute("INSERT INTO dataflow_entities VALUES (?, ?, ?, ?, ?)",
                         [dataflow_id, e["name"], e["description"], e["m_query"], e["partitions"]])
@@ -102,6 +126,12 @@ def _tokens(s: str) -> frozenset:
     return frozenset(SYNONYMS.get(w, w) for w in words)
 
 
+def _canon(s: str) -> str:
+    """Words with abbreviations expanded, joined: 'Policy No' and 'PolicyNumber' both give 'policynumber'."""
+    words = normalise_header(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", s)).split()
+    return "".join(SYNONYMS.get(w, w) for w in words)
+
+
 def _score(header: str, attribute: str) -> float:
     hc, ac = header.replace(" ", ""), _compact(attribute)
     if not hc or not ac:
@@ -109,6 +139,8 @@ def _score(header: str, attribute: str) -> float:
     if hc == ac:
         return 1.0
     s = SequenceMatcher(None, hc, ac).ratio()
+    if _canon(header) == _canon(attribute):            # same words once abbreviations are expanded
+        s = max(s, 0.97)
     if _tokens(header) == _tokens(attribute):          # same words, different order: "Premium (Gross)"
         s = max(s, 0.95)
     if min(len(hc), len(ac)) >= 4 and (hc.startswith(ac) or ac.startswith(hc)):   # "Policy No" ~ "PolicyNumber"

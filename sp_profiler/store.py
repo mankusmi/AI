@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
-from .dataflow import DATAFLOW_DDL
+from .dataflow import DATAFLOW_DDL, migrate
 from .mapping_load import LOAD_DDL
 
 DDL = """
@@ -78,8 +78,11 @@ def open_db(db_path: str | Path):
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path))
     con.execute(DDL)
+    migrate(con)
     con.execute(DATAFLOW_DDL)
     con.execute(LOAD_DDL)
+    from .m2sql import register_udfs
+    register_udfs(con)
     return con
 
 

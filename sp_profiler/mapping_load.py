@@ -72,6 +72,8 @@ def _to_datetime(v) -> Optional[datetime]:
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         return _excel_serial(v)
     s = str(v).strip()
+    if re.fullmatch(r"\d{5}(\.\d+)?", s):          # Excel serial date stored as text
+        return _excel_serial(float(s))
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
@@ -143,7 +145,7 @@ def coerce(value, data_type: str):
 
 
 # ------------------------------------------------------------------ mappings
-def save_mapping(con, entity: str, layout_hash: str, pairs: list[dict], attributes: list[str]) -> int:
+def save_mapping(con, entity: str, layout_hash: str, pairs: list[dict], attributes: list[str], kind: str = "attribute") -> int:
     """Replace the mapping of one layout. ``pairs`` = [{norm_header, attribute}]; blank attribute = unmapped."""
     valid = set(attributes)
     seen: set[str] = set()
@@ -153,15 +155,15 @@ def save_mapping(con, entity: str, layout_hash: str, pairs: list[dict], attribut
         if not attr:
             continue
         if attr not in valid:
-            raise ValueError(f"Unknown attribute {attr!r} for entity {entity!r}")
+            raise ValueError(f"Unknown target {attr!r} for entity {entity!r}")
         if attr in seen:
             raise ValueError(f"Attribute {attr!r} is mapped from more than one column")
         seen.add(attr)
-        rows.append([entity, layout_hash, hdr, attr])
+        rows.append([entity, layout_hash, hdr, attr, kind])
     con.execute("BEGIN")
     try:
-        con.execute("DELETE FROM column_mappings WHERE entity = ? AND layout_hash = ?", [entity, layout_hash])
-        con.executemany("INSERT INTO column_mappings (entity, layout_hash, norm_header, attribute) VALUES (?, ?, ?, ?)", rows)
+        con.execute("DELETE FROM column_mappings WHERE entity = ? AND layout_hash = ? AND kind = ?", [entity, layout_hash, kind])
+        con.executemany("INSERT INTO column_mappings (entity, layout_hash, norm_header, attribute, kind) VALUES (?, ?, ?, ?, ?)", rows)
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
@@ -170,15 +172,16 @@ def save_mapping(con, entity: str, layout_hash: str, pairs: list[dict], attribut
 
 
 # ------------------------------------------------------------------ loading
-def pending_sheets(con, entity: str, layout_hashes: Optional[list[str]] = None, force: bool = False) -> list[dict]:
+def pending_sheets(con, entity: str, layout_hashes: Optional[list[str]] = None, force: bool = False,
+                   kind: str = "attribute") -> list[dict]:
     """Distinct (content, sheet) units with a mapped layout and stored bytes, minus those already loaded."""
     rows = con.execute("""
         SELECT f.sha256, any_value(f.rel_path) AS rel_path, s.sheet, s.layout_hash, min(s.header_row) AS header_row
         FROM sheets s JOIN files f USING (run_id, rel_path)
         JOIN file_blobs b ON b.sha256 = f.sha256
         WHERE s.header_row IS NOT NULL AND s.layout_hash IN
-              (SELECT DISTINCT layout_hash FROM column_mappings WHERE entity = ?)
-        GROUP BY f.sha256, s.sheet, s.layout_hash ORDER BY rel_path, s.sheet""", [entity]).fetchall()
+              (SELECT DISTINCT layout_hash FROM column_mappings WHERE entity = ? AND kind = ?)
+        GROUP BY f.sha256, s.sheet, s.layout_hash ORDER BY rel_path, s.sheet""", [entity, kind]).fetchall()
     done = set() if force else set(con.execute(
         "SELECT source_sha256, sheet FROM load_log WHERE entity = ? AND status = 'ok'", [entity]).fetchall())
     out = []
@@ -191,22 +194,118 @@ def pending_sheets(con, entity: str, layout_hashes: Optional[list[str]] = None, 
     return out
 
 
+def _sheet_rows(blob: bytes, sheet: str, header_row: int):
+    """(header cells, iterator of (excel_row, row tuple)) for one stored sheet."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(blob), read_only=True, data_only=True)
+    ws = wb[sheet]
+    it = ws.iter_rows(min_row=header_row, values_only=True)
+    header = next(it)
+
+    def gen():
+        try:
+            for k, row in enumerate(it, start=header_row + 1):
+                yield k, row
+        finally:
+            wb.close()
+    return header, gen()
+
+
+def _norm_header_cells(header):
+    from .inspect_excel import normalise_header
+    return [normalise_header(c) if c is not None and str(c).strip() else f"<blank{i + 1}>" for i, c in enumerate(header)]
+
+
+def _rows_attribute_mode(con, entity, w, blob, col_names, types):
+    mapping = dict(con.execute("SELECT norm_header, attribute FROM column_mappings WHERE entity = ? AND layout_hash = ? "
+                               "AND kind = 'attribute'", [entity, w["layout_hash"]]).fetchall())
+    mapping = {h: a for h, a in mapping.items() if a in types}      # drop attrs gone from this dataflow
+    header, rows = _sheet_rows(blob, w["sheet"], w["header_row"])
+    col_for = {}
+    for i, h in enumerate(_norm_header_cells(header)):
+        if h in mapping and mapping[h] not in col_for:
+            col_for[mapping[h]] = i
+    for k, row in rows:
+        raws = []
+        for name in col_names:
+            i = col_for.get(name)
+            raws.append(row[i] if i is not None and i < len(row) else None)
+        if all(r is None or (isinstance(r, str) and not r.strip()) for r in raws):
+            yield k, None, None
+            continue
+        vals, errs = [], []
+        for name, raw in zip(col_names, raws):
+            v, ok = coerce(raw, types[name])
+            vals.append(v)
+            if not ok:
+                errs.append(name)
+        yield k, vals, errs
+
+
+def _rows_m_mode(con, entity, w, blob, plan, col_names, types, batch=20000):
+    """Run the translated Power Query pipeline over one sheet (staged as VARCHAR columns)."""
+    from .m2sql import stage_table, stage_value
+    inputs = plan["inputs"]
+    mapping = dict(con.execute("SELECT norm_header, attribute FROM column_mappings WHERE entity = ? AND layout_hash = ? "
+                               "AND kind = 'input'", [entity, w["layout_hash"]]).fetchall())
+    header, rows = _sheet_rows(blob, w["sheet"], w["header_row"])
+    col_for = {}
+    for i, h in enumerate(_norm_header_cells(header)):
+        if h in mapping and mapping[h] in inputs and mapping[h] not in col_for:
+            col_for[mapping[h]] = i
+    staged, empty = [], 0
+    for k, row in rows:
+        vals = [stage_value(row[col_for[c]]) if c in col_for and col_for[c] < len(row) else None for c in inputs]
+        if all(v is None or not v.strip() for v in vals):
+            empty += 1
+            continue
+        staged.append((k, *vals))
+    stage_table(con, inputs, staged)
+    res = con.execute(plan["sql"])
+    out_cols = [d[0] for d in res.description]
+    result_rows = res.fetchall()          # fully fetched: the connection is reused for the INSERTs
+    idx = {c.lower(): i for i, c in enumerate(out_cols)}
+    row_i = idx.get("__row")
+    for _ in range(empty):
+        yield None, None, None
+    for r in result_rows:
+        vals, errs = [], []
+        for name in col_names:
+            i = idx.get(name.lower())
+            v, ok = coerce(r[i] if i is not None else None, types[name])
+            vals.append(v)
+            if not ok:
+                errs.append(name)
+        yield (r[row_i] if row_i is not None else None), vals, errs
+
+
 def load_entity(con, dataflow_id: str, entity: str, layout_hashes: Optional[list[str]] = None,
                 force: bool = False, progress: Optional[Callable[[int, int, str], None]] = None,
                 batch: int = 5000) -> dict:
-    """Append mapped rows for ``entity`` from every pending stored sheet. Returns a summary dict."""
-    import openpyxl
+    """Append rows for ``entity`` from every pending stored sheet. Returns a summary dict.
+
+    Uses the translated Power Query pipeline when the entity has one enabled, otherwise the plain
+    column-to-attribute mapping.
+    """
+    from . import transforms
+    from .m2sql import register_udfs
     attrs = [{"name": r[0], "data_type": r[1]} for r in con.execute(
         "SELECT name, data_type FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ? ORDER BY position",
         [dataflow_id, entity]).fetchall()]
     if not attrs:
         raise LookupError(f"Entity {entity!r} not found in dataflow {dataflow_id}")
+    plan = transforms.resolve(con, dataflow_id, entity)
+    if plan["use_m"] and plan["mode"] != "m":
+        raise ValueError(f"Power Query transformation for {entity!r} is not ready ({plan['status']})")
+    kind = "input" if plan["mode"] == "m" else "attribute"
+    if kind == "input":
+        register_udfs(con)
     table = ensure_target_table(con, entity, attrs)
     types = {a["name"]: a["data_type"] for a in attrs}
     col_names = [a["name"] for a in attrs]
     load_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:6]
-    work = pending_sheets(con, entity, layout_hashes, force)
-    total = {"load_id": load_id, "table": table, "sheets_loaded": 0, "sheets_failed": 0,
+    work = pending_sheets(con, entity, layout_hashes, force, kind)
+    total = {"load_id": load_id, "table": table, "sheets_loaded": 0, "sheets_failed": 0, "mode": plan["mode"],
              "rows": 0, "coerce_error_cells": 0, "sheets_planned": len(work)}
     insert_sql = (f"INSERT INTO {quote_ident(table)} ({', '.join(quote_ident(c) for c in col_names + [p[0] for p in PROVENANCE])}) "
                   f"VALUES ({', '.join('?' for _ in col_names + PROVENANCE)})")
@@ -217,50 +316,24 @@ def load_entity(con, dataflow_id: str, entity: str, layout_hashes: Optional[list
         loaded = empty = bad = 0
         status, err = "ok", ""
         try:
-            mapping = dict(con.execute("SELECT norm_header, attribute FROM column_mappings "
-                                       "WHERE entity = ? AND layout_hash = ?", [entity, w["layout_hash"]]).fetchall())
-            mapping = {h: a for h, a in mapping.items() if a in types}      # drop attrs gone from this dataflow
-            blob = con.execute("SELECT content FROM file_blobs WHERE sha256 = ?", [w["sha256"]]).fetchone()[0]
-            wb = openpyxl.load_workbook(io.BytesIO(bytes(blob)), read_only=True, data_only=True)
-            try:
-                ws = wb[w["sheet"]]
-                hdr_row, rows_iter = w["header_row"], ws.iter_rows(min_row=w["header_row"], values_only=True)
-                header = next(rows_iter)
-                from .inspect_excel import normalise_header
-                norms = [normalise_header(c) if c is not None and str(c).strip() else f"<blank{i + 1}>"
-                         for i, c in enumerate(header)]
-                col_for = {}                                   # attribute -> column index
-                for i, h in enumerate(norms):
-                    if h in mapping and mapping[h] not in col_for:
-                        col_for[mapping[h]] = i
-                buf = []
-                for k, row in enumerate(rows_iter, start=hdr_row + 1):
-                    vals, errs = [], []
-                    any_value = False
-                    for name in col_names:
-                        i = col_for.get(name)
-                        raw = row[i] if i is not None and i < len(row) else None
-                        if raw is not None and not (isinstance(raw, str) and not raw.strip()):
-                            any_value = True
-                        v, ok = coerce(raw, types[name])
-                        vals.append(v)
-                        if not ok:
-                            errs.append(name)
-                    if not any_value:
-                        empty += 1
-                        continue
-                    bad += len(errs)
-                    buf.append(vals + [load_id, w["rel_path"], w["sha256"], w["sheet"], k, w["layout_hash"],
-                                       started, ",".join(errs) or None])
-                    if len(buf) >= batch:
-                        con.executemany(insert_sql, buf)
-                        loaded += len(buf)
-                        buf = []
-                if buf:
+            blob = bytes(con.execute("SELECT content FROM file_blobs WHERE sha256 = ?", [w["sha256"]]).fetchone()[0])
+            gen = (_rows_m_mode(con, entity, w, blob, plan, col_names, types) if kind == "input"
+                   else _rows_attribute_mode(con, entity, w, blob, col_names, types))
+            buf = []
+            for k, vals, errs in gen:
+                if vals is None:
+                    empty += 1
+                    continue
+                bad += len(errs)
+                buf.append(vals + [load_id, w["rel_path"], w["sha256"], w["sheet"], k, w["layout_hash"],
+                                   started, ",".join(errs) or None])
+                if len(buf) >= batch:
                     con.executemany(insert_sql, buf)
                     loaded += len(buf)
-            finally:
-                wb.close()
+                    buf = []
+            if buf:
+                con.executemany(insert_sql, buf)
+                loaded += len(buf)
         except Exception as e:
             status, err = "error", f"{type(e).__name__}: {e}"
         if status == "error":

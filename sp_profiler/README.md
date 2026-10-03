@@ -85,3 +85,26 @@ sp-profile serve --db profile.duckdb      # prints http://127.0.0.1:8765/?t=<tok
 Security: the server listens on 127.0.0.1 only, every API call needs the per-run token and a localhost `Host` header, and
 the page loads no external scripts, fonts or images.
 Only Gen1 `model.json` is parsed; mapping is by column name/layout, M-query transformations are shown but not executed.
+
+## Power Query transformations and lookups
+
+Gen1 dataflow entities usually carry M steps (renames, type changes, filters, computed columns, lookups). On the
+**Map & load** tab the entity's M query is translated into a DuckDB SQL pipeline (one CTE per step) that runs over each
+sheet; the result is converted to the entity's attribute types and appended to `df_<entity>`.
+
+* **Input columns:** the columns the M steps read (e.g. `Policy No`, `Currency`). You map each layout's sheet columns to these
+  (suggestions use name similarity + abbreviations such as `No`≈`Number`, `Ccy`≈`Currency`), so one set of steps serves every layout.
+* **Supported steps:** PromoteHeaders, RenameColumns, RemoveColumns, SelectColumns, ReorderColumns, TransformColumnTypes,
+  TransformColumns, AddColumn, ReplaceValue, SelectRows, Distinct, Sort, FirstN, Skip/RemoveFirstN, FillDown, Combine,
+  NestedJoin + ExpandTableColumn, Join, `#table`/FromRows; expressions with `if/then/else`, `and/or/not`, `&`, arithmetic and common
+  `Text.*`, `Number.*`, `Date.*`, `List.Contains` functions. Everything before the header promotion (Excel.Workbook, navigation,
+  title-row skips) is replaced by the staged sheet.
+* **Lookups:** a referenced query is resolved from an inline `#table`, an explicit **binding** to a DuckDB table, or an already-loaded
+  entity table. Lookups that read an external file are reported as `missing`; import the file as a table (CSV/Excel, button on the panel)
+  and bind it.
+* **Nothing is skipped silently.** Steps that cannot be translated are listed with the reason and the entity is *blocked* until you
+  (a) write a SQL override (a `SELECT` over staged table `_stg`: input columns as VARCHAR plus `__row`), or (b) tick "accept partial
+  translation" (untranslated steps are then NOT applied). Per-step and final-output previews run on a sample of a stored file.
+* **Not supported (flagged):** Table.Group/Pivot/Unpivot/SplitColumn/CombineColumns, custom M functions, `try/otherwise`,
+  fuzzy joins, parameters, merges against external sources. Type conversions follow the loader: day-first dates, `1,200.50`, `(5)`.
+* The conversion helpers are SQL macros `sp_dbl/sp_dec/sp_int/sp_ts/sp_bool/...` stored in the database, so they also work in the SQL console.

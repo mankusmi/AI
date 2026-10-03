@@ -54,6 +54,7 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
 <section id="map">
  <div class="card"><div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center"><b>Dataflow / entity</b><select id="mdf"></select><select id="ment"></select>
   <span class="mute" id="mtable"></span></div></div>
+ <div id="mtransform"></div>
  <div id="mlayouts"></div>
  <div class="card"><h2>Append mapped rows to DuckDB</h2><p class="mute">Loads every stored sheet whose layout has a saved mapping and that hasn't been loaded yet (same content + sheet is never loaded twice unless forced).</p>
   <button class="b p" id="mload">Load / append now</button> <label class="mute"><input type="checkbox" id="mforce"> force reload</label>
@@ -115,8 +116,43 @@ let DF=[];
 async function initMap(){DF=await api("/api/dataflows");const s=$("#mdf");const keep=s.value;s.replaceChildren(...DF.map(d=>h("option",{value:d.dataflow_id},`${d.name||"(unnamed)"} · ${d.dataflow_id}`)));if(keep)s.value=keep;fillEnt();loadLog()}
 function fillEnt(){const d=DF.find(x=>x.dataflow_id===$("#mdf").value);$("#ment").replaceChildren(...(d?d.entities:[]).map(e=>h("option",{value:e.name},e.name)));loadMap()}
 $("#mdf").onchange=fillEnt;$("#ment").onchange=loadMap;
-async function loadMap(){const box=$("#mlayouts");box.replaceChildren();if(!$("#mdf").value||!$("#ment").value){box.append(h("div",{class:"card mute"},"Import a dataflow first."));return}
- const m=await api(`/api/mapping?dataflow_id=${$("#mdf").value}&entity=${encodeURIComponent($("#ment").value)}`);$("#mtable").textContent="→ table "+m.table;
+async function loadTransform(){const box=$("#mtransform");box.replaceChildren();
+ const dfid=$("#mdf").value,ent=$("#ment").value;if(!dfid||!ent)return;
+ let tr;try{tr=await api(`/api/transform?dataflow_id=${dfid}&entity=${encodeURIComponent(ent)}`)}catch(e){box.append(h("div",{class:"card bad"},e.message));return}
+ if(!tr.has_m){box.append(h("div",{class:"card mute"},"No Power Query code stored for this entity, so columns are mapped straight to attributes."));return}
+ const tables=(await api("/api/schema")).filter(x=>x.kind==="table").map(x=>x.name);
+ const useBox=h("input",{type:"checkbox"}),partBox=h("input",{type:"checkbox"});useBox.checked=tr.use_m;partBox.checked=tr.accept_partial;
+ const ov=h("textarea",{rows:8,class:"mono",placeholder:"Optional: your own SELECT reading staged table _stg (columns = the input columns below, plus __row). Overrides the generated SQL."});ov.value=tr.override_sql;
+ const extra=h("input",{type:"text",placeholder:"extra input columns for your SQL, comma separated"});extra.value=(tr.extra_inputs||[]).join(", ");
+ const msg=h("span",{class:"mute"}),prev=h("div",{style:"margin-top:.6rem"});
+ const laySel=h("select",{},...(await api("/api/layouts")).map(l=>h("option",{value:l.layout_hash},`${l.layout_hash} · ${l.example}`)));
+ const save=async()=>{try{await api("/api/transform/save",{dataflow_id:dfid,entity:ent,use_m:useBox.checked,accept_partial:partBox.checked,override_sql:ov.value,extra_inputs:extra.value.split(",")});msg.textContent="Saved";msg.className="ok";loadMap()}catch(e){msg.textContent=e.message;msg.className="bad"}};
+ const preview=async step=>{prev.replaceChildren(h("span",{class:"mute"},"Running on a sample of the first stored file with that layout…"));
+  try{const r=await api("/api/transform/preview",{dataflow_id:dfid,entity:ent,layout_hash:laySel.value,step,limit:50});
+   prev.replaceChildren(h("div",{class:"mute"},`${step?"Output of step "+step:"Final output"} · ${r.staged_rows} sample row(s) staged · ${r.rows.length} shown`),h("div",{class:"scroll"},table(r.columns,r.rows)))}
+  catch(e){prev.replaceChildren(h("div",{class:"bad"},e.message))}};
+ const stepRows=tr.steps.map((s,i)=>[i+1,s.query===ent?"":s.query,s.name,s.func,s.ok?h("span",{class:"ok"},"✓ translated"):h("span",{class:"bad"},"✗ "+s.error),s.ok&&s.cte?h("button",{class:"b",on:{click:()=>preview(s.name)}},"Preview"):""]);
+ const refs=Object.entries(tr.references).map(([n,r])=>{const sel=h("select",{},h("option",{value:""},"— none —"),...tables.map(x=>h("option",{value:x},x)));sel.value=tr.bindings[n]||"";
+  const bm=h("span",{class:"mute"});
+  return h("div",{style:"margin:.3rem 0"},h("b",{},n)," ",h("span",{class:"pill"},r.kind)," ",r.reason?h("span",{class:"bad"},r.reason+" "):"","bind to table: ",sel," ",
+   h("button",{class:"b",on:{click:async()=>{try{await api("/api/bindings/save",{dataflow_id:dfid,query_name:n,table_name:sel.value});bm.textContent="Bound";loadMap()}catch(e){bm.textContent=e.message;bm.className="bad"}}}},"Bind")," ",bm)});
+ const refPath=h("input",{type:"text",placeholder:"full path of a lookup .xlsx/.csv on this computer"}),refMsg=h("span",{class:"mute"});
+ const statusCls=tr.mode==="m"?"ok":tr.use_m?"warn":"mute";
+ box.append(h("div",{class:"card"},h("h2",{},"Power Query transformation · ",h("span",{class:statusCls},tr.status)),
+  h("div",{class:"mute"},tr.translated?"All steps were translated to SQL.":"Some steps are not supported: edit the SQL below or accept a partial translation (skipped steps are NOT applied)."),
+  tr.error?h("div",{class:"bad"},tr.error):"",
+  h("div",{style:"margin:.5rem 0"},h("label",{},useBox," use Power Query steps when loading "),h("label",{style:"margin-left:1rem"},partBox," accept partial translation")),
+  h("details",{open:tr.translated?null:true},h("summary",{},`Steps (${tr.steps.length})`),h("div",{class:"scroll"},table(["#","Query","Step","Function","Status",""],stepRows))),
+  Object.keys(tr.references).length?h("div",{style:"margin-top:.6rem"},h("b",{},"Lookups / referenced queries"),...refs):"",
+  h("div",{style:"margin:.5rem 0"},"Import a lookup file as a table: ",refPath," ",h("button",{class:"b",on:{click:async()=>{try{const r=await api("/api/reference/import",{path:refPath.value});refMsg.textContent=`Created table ${r.table} (${r.rows} rows). Bind a lookup to it above.`;refMsg.className="ok";loadMap()}catch(e){refMsg.textContent=e.message;refMsg.className="bad"}}}},"Import")," ",refMsg),
+  h("details",{},h("summary",{},"Generated SQL"),h("pre",{class:"mono mute scroll",style:"white-space:pre-wrap"},tr.generated_sql||"(none)")),
+  h("div",{style:"margin-top:.5rem"},h("b",{},"SQL override"),ov,h("div",{style:"margin-top:.3rem"},extra)),
+  tr.inputs.length?h("div",{class:"mute",style:"margin-top:.4rem"},"Input columns the steps read (map your sheet columns to these below): ",tr.inputs.join(", ")):"",
+  tr.outputs.length?h("div",{style:"margin-top:.4rem"},"Output: ",tr.outputs.map(o=>o.name).join(", "),tr.missing_attributes.length?h("div",{class:"warn"},"Attributes the steps do not produce (will be NULL): "+tr.missing_attributes.join(", ")):h("div",{class:"ok"},"All dataflow attributes are produced.")):"",
+  tr.sql_error?h("div",{class:"bad"},"SQL error: "+tr.sql_error):"",
+  h("div",{style:"margin-top:.6rem;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center"},h("button",{class:"b p",on:{click:save}},"Save settings"),msg,h("span",{class:"mute",style:"margin-left:auto"},"Preview on layout:"),laySel,h("button",{class:"b",on:{click:()=>preview("")}},"Preview final output")),prev))}
+async function loadMap(){loadTransform();const box=$("#mlayouts");box.replaceChildren();if(!$("#mdf").value||!$("#ment").value){box.append(h("div",{class:"card mute"},"Import a dataflow first."));return}
+ const m=await api(`/api/mapping?dataflow_id=${$("#mdf").value}&entity=${encodeURIComponent($("#ment").value)}`);$("#mtable").textContent="→ table "+m.table+(m.mode==="m"?" · mapping sheet columns to Power Query input columns":" · mapping sheet columns to attributes");
  if(!m.layouts.length)box.append(h("div",{class:"card mute"},"Profile some files first (step 1)."));
  for(const lay of m.layouts){const sels=[];
   const rows=lay.norm_headers.map((nh,i)=>{const sel=h("select",{"data-h":nh},h("option",{value:""},"— skip —"),...m.attributes.map(a=>h("option",{value:a.name},`${a.name} (${a.type})`)));
@@ -125,8 +161,8 @@ async function loadMap(){const box=$("#mlayouts");box.replaceChildren();if(!$("#
   const msg=h("span",{class:"mute"});
   const save=h("button",{class:"b p",on:{click:async()=>{try{const r=await api("/api/mapping/save",{dataflow_id:$("#mdf").value,entity:$("#ment").value,layout_hash:lay.layout_hash,pairs:sels.map(s=>({norm_header:s.dataset.h,attribute:s.value}))});msg.textContent=`Saved ${r.saved} mappings`;msg.className="ok"}catch(e){msg.textContent=e.message;msg.className="bad"}}}},"Save mapping");
   const unm=m.attributes.filter(a=>!sels.some(s=>s.value===a.name)).length;
-  box.append(h("details",{class:"card",open:(lay.pending||!Object.keys(lay.saved).length)||null},h("summary",{},h("b",{},lay.layout_hash)," · ",lay.files," file(s) · ",lay.norm_headers.length," columns · ",lay.pending?h("span",{class:"warn"},"has unloaded data"):"",Object.keys(lay.saved).length?h("span",{class:"ok"}," · mapped"):h("span",{class:"mute"}," · not mapped yet")),
-   h("div",{class:"scroll",style:"margin:.5rem 0"},table(["#","Source column","Status","→ Target attribute"],rows)),save," ",msg,h("div",{class:"mute"},"Example: "+lay.example)))}}
+  box.append(h("details",{class:"card",open:(lay.pending||!Object.keys(lay.saved).length)||null},h("summary",{},h("b",{},lay.layout_hash)," · ",lay.files," file(s) · ",lay.norm_headers.length," columns · ",unm?h("span",{class:"warn"},unm+" target(s) unmapped · "):"",lay.pending?h("span",{class:"warn"},"has unloaded data"):"",Object.keys(lay.saved).length?h("span",{class:"ok"}," · mapped"):h("span",{class:"mute"}," · not mapped yet")),
+   h("div",{class:"scroll",style:"margin:.5rem 0"},table(["#","Source column","Status",m.mode==="m"?"→ Power Query input column":"→ Target attribute"],rows)),save," ",msg,h("div",{class:"mute"},"Example: "+lay.example)))}}
 $("#mload").onclick=async()=>{$("#lres").replaceChildren();try{const{job}=await api("/api/load/start",{dataflow_id:$("#mdf").value,entity:$("#ment").value,force:$("#mforce").checked});
  const j=await pollJob(job,"#lbar","#lmsg");$("#lres").replaceChildren(j.status==="done"?h("div",{class:j.result.sheets_failed?"warn":"ok"},`Loaded ${fmt(j.result.rows)} rows from ${j.result.sheets_loaded} sheet(s) into ${j.result.table}; ${j.result.sheets_failed} failed; ${fmt(j.result.coerce_error_cells)} cells couldn't be converted (NULL, see _coerce_errors). Nothing pending? Save a mapping first.`):h("div",{class:"bad"},j.error));loadLog();loadMap()}catch(e){$("#lres").replaceChildren(h("div",{class:"bad"},e.message))}};
 async function loadLog(){const l=await api("/api/loads");$("#loglist").replaceChildren(l.length?table(["When","Entity","File","Sheet","Rows","Empty","Bad cells","Status"],l.map(x=>[x.finished?.slice(0,19),x.entity,x.source_path,x.sheet,fmt(x.rows_loaded),fmt(x.rows_skipped_empty),fmt(x.coerce_error_cells),x.error?x.status+": "+x.error:x.status])):h("div",{class:"mute",style:"padding:.5rem"},"No loads yet."))}

@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from . import dataflow as df
 from . import mapping_load as ml
 from . import query as q
+from . import transforms as tf
 from .profiler import profile
 from .sources import FileListSource, GraphSource, LocalSource
 from .store import BlobSink, open_db, save_run
@@ -159,25 +160,80 @@ class App:
             out.append({"dataflow_id": did, "name": name, "imported": imported, "source_file": src, "entities": ents})
         return out
 
-    def mapping(self, dataflow_id: str, entity: str) -> dict:
-        cur = self.cur()
+    def mapping_targets(self, cur, dataflow_id: str, entity: str) -> tuple[str, list[dict], dict]:
         attrs = [{"name": a, "type": t} for a, t in cur.execute(
             "SELECT name, data_type FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ? ORDER BY position",
             [dataflow_id, entity]).fetchall()]
         if not attrs:
             raise LookupError("Unknown dataflow/entity")
+        plan = tf.resolve(cur, dataflow_id, entity)
+        if plan["mode"] == "m":
+            return "input", [{"name": n, "type": "input column"} for n in plan["inputs"]], plan
+        return "attribute", attrs, plan
+
+    def mapping(self, dataflow_id: str, entity: str) -> dict:
+        cur = self.cur()
+        kind, targets, plan = self.mapping_targets(cur, dataflow_id, entity)
         saved: dict[str, dict] = {}
-        for lh, nh, a in cur.execute("SELECT layout_hash, norm_header, attribute FROM column_mappings WHERE entity = ?", [entity]).fetchall():
+        for lh, nh, a in cur.execute("SELECT layout_hash, norm_header, attribute FROM column_mappings "
+                                     "WHERE entity = ? AND kind = ?", [entity, kind]).fetchall():
             saved.setdefault(lh, {})[nh] = a
-        pending = {w["layout_hash"] for w in ml.pending_sheets(cur, entity)}
+        pending = {w["layout_hash"] for w in ml.pending_sheets(cur, entity, kind=kind)}
         out = []
         for lay in self.layouts():
-            sugg = df.suggest_mapping(lay["norm_headers"], [a["name"] for a in attrs])
+            sugg = df.suggest_mapping(lay["norm_headers"], [a["name"] for a in targets])
             lay["saved"] = saved.get(lay["layout_hash"], {})
             lay["suggested"] = {h: s for h, s in sugg.items() if h not in lay["saved"]}
             lay["pending"] = lay["layout_hash"] in pending
             out.append(lay)
-        return {"attributes": attrs, "layouts": out, "table": ml.target_table(entity)}
+        return {"attributes": targets, "layouts": out, "table": ml.target_table(entity), "kind": kind,
+                "mode": plan["mode"]}
+
+    def transform(self, dataflow_id: str, entity: str) -> dict:
+        cur = self.cur()
+        plan = tf.resolve(cur, dataflow_id, entity)
+        p, st = plan["pipeline"], plan["settings"] or {}
+        attrs = [r[0] for r in cur.execute("SELECT name FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ? ORDER BY position",
+                                           [dataflow_id, entity]).fetchall()]
+        info = {"steps": [{k: s.get(k, "") for k in ("query", "name", "func", "ok", "error", "cte")} for s in p.steps],
+                "inputs": p.inputs, "references": p.references, "translated": p.complete, "error": p.error,
+                "generated_sql": plan["generated_sql"], "status": plan["status"], "mode": plan["mode"],
+                "use_m": plan["use_m"], "explicit": bool(plan["settings"]), "override_sql": st.get("override_sql", ""),
+                "accept_partial": st.get("accept_partial", False), "extra_inputs": st.get("extra_inputs", []),
+                "has_m": bool(p.steps) or bool(p.error), "bindings": tf.bindings(cur, dataflow_id),
+                "outputs": [], "missing_attributes": [], "sql_error": ""}
+        if plan["sql"]:
+            try:
+                cols = tf.output_columns(cur, plan)
+                info["outputs"] = [{"name": n, "type": t} for n, t in cols if n != "__row"]
+                have = {n.lower() for n, _ in cols}
+                info["missing_attributes"] = [a for a in attrs if a.lower() not in have]
+            except Exception as e:
+                info["sql_error"] = f"{type(e).__name__}: {e}"
+        return info
+
+    def transform_preview(self, b: dict) -> dict:
+        cur = self.cur()
+        plan = tf.resolve(cur, b["dataflow_id"], b["entity"])
+        p = plan["pipeline"]
+        step = b.get("step") or ""
+        if step:
+            rec = next((s for s in p.steps if s["name"] == step and s["ok"]), None)
+            if not rec:
+                raise LookupError(f"Step {step!r} is not translated")
+            sql = p.sql(final=rec["cte"], limit=int(b.get("limit", 50)))
+            inputs = list(dict.fromkeys(p.inputs + (plan["settings"] or {}).get("extra_inputs", [])))
+            plan = {**plan, "inputs": inputs}
+        elif plan["sql"]:
+            sql = f"SELECT * FROM ({plan['sql']}) LIMIT {int(b.get('limit', 50))}"
+        else:
+            raise ValueError(f"Nothing to preview: {plan['status']}")
+        from .m2sql import register_udfs
+        register_udfs(cur)
+        n = tf.stage_sample(cur, plan, b["entity"], b["layout_hash"])
+        res = q.run_sql(cur, sql, limit=int(b.get("limit", 50)))
+        res["staged_rows"] = n
+        return res
 
 
 def make_handler(app: App, port: int):
@@ -271,6 +327,8 @@ def make_handler(app: App, port: int):
                 return app.layouts()
             if path == "/api/mapping":
                 return app.mapping(qs["dataflow_id"], qs["entity"])
+            if path == "/api/transform":
+                return app.transform(qs["dataflow_id"], qs["entity"])
             if path == "/api/schema":
                 return q.schema(cur)
             if path == "/api/loads":
@@ -301,9 +359,29 @@ def make_handler(app: App, port: int):
                 return {"dataflow_id": did, "new": new, "name": parsed["name"],
                         "entities": [{"name": e["name"], "attributes": len(e["attributes"])} for e in parsed["entities"]]}
             if path == "/api/mapping/save":
-                attrs = [r[0] for r in cur.execute("SELECT name FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ?",
-                                                    [b["dataflow_id"], b["entity"]]).fetchall()]
-                return {"saved": ml.save_mapping(cur, b["entity"], b["layout_hash"], b["pairs"], attrs)}
+                kind, targets, _ = app.mapping_targets(cur, b["dataflow_id"], b["entity"])
+                return {"saved": ml.save_mapping(cur, b["entity"], b["layout_hash"], b["pairs"],
+                                                 [t["name"] for t in targets], kind)}
+            if path == "/api/transform/save":
+                sql = (b.get("override_sql") or "").strip()
+                if sql:
+                    stmts = cur.extract_statements(sql)
+                    if len(stmts) != 1 or stmts[0].type != q.duckdb.StatementType.SELECT:
+                        raise ValueError("The SQL override must be a single SELECT/WITH statement reading the staged table `_stg` (or CTE `src`)")
+                tf.save_settings(cur, b["dataflow_id"], b["entity"], bool(b.get("use_m")), sql,
+                                 bool(b.get("accept_partial")), [x.strip() for x in b.get("extra_inputs", []) if x.strip()])
+                return app.transform(b["dataflow_id"], b["entity"])
+            if path == "/api/transform/preview":
+                return app.transform_preview(b)
+            if path == "/api/bindings/save":
+                cur.execute("DELETE FROM query_bindings WHERE dataflow_id = ? AND query_name = ?", [b["dataflow_id"], b["query_name"]])
+                if b.get("table_name"):
+                    if not cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [b["table_name"]]).fetchone():
+                        raise LookupError(f"Table {b['table_name']!r} does not exist")
+                    cur.execute("INSERT INTO query_bindings VALUES (?, ?, ?)", [b["dataflow_id"], b["query_name"], b["table_name"]])
+                return {"ok": True}
+            if path == "/api/reference/import":
+                return tf.import_reference(cur, b["path"], b.get("table_name", ""), b.get("sheet", ""))
             if path == "/api/sql":
                 return q.run_sql(cur, b["sql"], int(b.get("limit", 1000)), bool(b.get("allow_write")))
             if path == "/api/profile-data":
