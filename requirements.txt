@@ -6,3 +6,6 @@ msal>=1.24
 
 # For running the test suite:
 pytest>=7.0
+
+# For sp_profiler (SharePoint Excel profiler):
+openpyxl>=3.1
