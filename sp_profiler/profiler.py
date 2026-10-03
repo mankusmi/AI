@@ -17,7 +17,9 @@ META_KEYS = ("site_url", "library", "drive_id", "item_id", "sp_path", "mime_type
 
 def profile(source, extensions: Optional[Iterable[str]] = None, scan_rows: int = 50,
             min_headers: int = 3, include_all_files: bool = True,
-            progress: Optional[Callable[[int, str], None]] = None) -> dict:
+            progress: Optional[Callable[[int, str], None]] = None,
+            blob_sink: Optional[Callable[[object, str], bool]] = None) -> dict:
+    """``blob_sink(local_path, sha256) -> stored?`` is called while each file is still on disk."""
     wanted = {e.lower() if e.startswith(".") else f".{e.lower()}" for e in extensions} if extensions \
         else EXCEL_EXTS | LEGACY_EXTS
     files: list[dict] = []
@@ -35,7 +37,7 @@ def profile(source, extensions: Optional[Iterable[str]] = None, scan_rows: int =
             "location": entry.location, "inspected": is_target,
             "status": "not_inspected", "error": "", "sha256": "", "sheet_count": None,
             "data_sheet_count": None, "total_data_rows": None, "primary_sheet": "",
-            "primary_layout_hash": "", "layout_hashes": "", "has_macros": None,
+            "primary_layout_hash": "", "layout_hashes": "", "has_macros": None, "content_stored": False,
             **{k: entry.meta.get(k) for k in META_KEYS},
         }
         if is_target:
@@ -44,6 +46,8 @@ def profile(source, extensions: Optional[Iterable[str]] = None, scan_rows: int =
             try:
                 with entry.materialize() as local:
                     wb = inspect_workbook(local, scan_rows, min_headers)
+                    if blob_sink and wb.sha256:
+                        row["content_stored"] = bool(blob_sink(local, wb.sha256))
             except Exception as e:  # download or IO failure must not abort the run
                 wb = None
                 row.update(status="error", error=f"{type(e).__name__}: {e}")

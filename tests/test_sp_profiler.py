@@ -115,3 +115,26 @@ def test_duckdb_store(tree, tmp_path_factory):
     n = con.execute("select count(*) from sheet_headers where run_id=(select run_id from latest_run) "
                     "and norm_header='policy no'").fetchone()[0]
     assert n == 6   # jan, feb, mar, mar_copy, apr, may
+
+
+def test_content_stored_deduped_and_exportable(tree, tmp_path_factory):
+    import duckdb
+    db = tmp_path_factory.mktemp("db2") / "p.duckdb"
+    assert main(["local", "--path", str(tree), "--db", str(db)]) == 0
+    con = duckdb.connect(str(db))
+    # 9 Excel-ish files, all have a hash; mar/mar_copy differ here -> check against distinct hashes
+    n_hash = con.execute("select count(distinct sha256) from v_files where sha256 <> ''").fetchone()[0]
+    assert con.execute("select count(*) from file_blobs").fetchone()[0] == n_hash
+    assert con.execute("select count(*) from v_files where content_stored").fetchone()[0] == 9
+    con.close()
+    dest = tmp_path_factory.mktemp("exp")
+    assert main(["export", "--db", str(db), "--rel-path", "A/jan.xlsx", "--dest", str(dest)]) == 0
+    assert (dest / "jan.xlsx").read_bytes() == (tree / "A/jan.xlsx").read_bytes()
+
+
+def test_no_content_flag(tree, tmp_path_factory):
+    import duckdb
+    db = tmp_path_factory.mktemp("db3") / "p.duckdb"
+    assert main(["local", "--path", str(tree), "--db", str(db), "--no-content"]) == 0
+    con = duckdb.connect(str(db))
+    assert con.execute("select count(*) from file_blobs").fetchone()[0] == 0

@@ -22,7 +22,11 @@ CREATE TABLE IF NOT EXISTS files (
     quickxor_hash VARCHAR, sha1_hash VARCHAR, sha256 VARCHAR,
     inspected BOOLEAN, status VARCHAR, error VARCHAR, sheet_count INTEGER, data_sheet_count INTEGER,
     total_data_rows BIGINT, primary_sheet VARCHAR, primary_layout VARCHAR, primary_family VARCHAR,
-    layout_hashes VARCHAR, has_macros BOOLEAN);
+    layout_hashes VARCHAR, has_macros BOOLEAN, content_stored BOOLEAN);
+
+-- Raw file bytes, stored once per distinct content (files.sha256 -> file_blobs.sha256)
+CREATE TABLE IF NOT EXISTS file_blobs (
+    sha256 VARCHAR PRIMARY KEY, size_bytes BIGINT, stored_utc TIMESTAMPTZ DEFAULT now(), content BLOB);
 
 CREATE TABLE IF NOT EXISTS sheets (
     run_id VARCHAR, rel_path VARCHAR, sheet VARCHAR, state VARCHAR, max_row INTEGER, max_col INTEGER,
@@ -67,14 +71,52 @@ def table_columns(con, table: str) -> list[str]:
                                       f"WHERE table_name = '{table}' ORDER BY ordinal_position").fetchall()]
 
 
-def save_run(db_path: str | Path, result: dict, source_type: str, root: str,
-             site_url: str = "", library: str = "", folder: str = "", params: dict | None = None) -> str:
+def open_db(db_path: str | Path):
     import duckdb
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:6]
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path))
+    con.execute(DDL)
+    return con
+
+
+class BlobSink:
+    """Stores file bytes in ``file_blobs`` (deduplicated by SHA-256); skips files over ``max_bytes``."""
+
+    def __init__(self, con, max_bytes: int = 200 * 1024 * 1024):
+        self.con, self.max_bytes = con, max_bytes
+        self.skipped_too_large = 0
+
+    def __call__(self, local_path, sha256: str) -> bool:
+        path = Path(local_path)
+        size = path.stat().st_size
+        if size > self.max_bytes:
+            self.skipped_too_large += 1
+            return False
+        if self.con.execute("SELECT 1 FROM file_blobs WHERE sha256 = ?", [sha256]).fetchone():
+            return True
+        self.con.execute("INSERT INTO file_blobs (sha256, size_bytes, content) VALUES (?, ?, ?)",
+                         [sha256, size, path.read_bytes()])
+        return True
+
+
+def export_file(con, rel_path: str, dest: str | Path) -> Path:
+    """Write the stored bytes of ``rel_path`` (latest run containing it) to ``dest`` (dir or file path)."""
+    row = con.execute(
+        "SELECT f.name, b.content FROM files f JOIN file_blobs b USING (sha256) "
+        "JOIN runs r USING (run_id) WHERE f.rel_path = ? ORDER BY r.started_utc DESC LIMIT 1", [rel_path]).fetchone()
+    if not row:
+        raise LookupError(f"No stored content for {rel_path!r}")
+    dest = Path(dest)
+    if dest.is_dir():
+        dest = dest / row[0]
+    dest.write_bytes(bytes(row[1]))
+    return dest
+
+
+def save_run(con, result: dict, source_type: str, root: str,
+             site_url: str = "", library: str = "", folder: str = "", params: dict | None = None) -> str:
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:6]
     try:
-        con.execute(DDL)
         con.execute("BEGIN")
         con.execute("INSERT INTO runs VALUES (?, now(), ?, ?, ?, ?, ?, ?, ?, ?)",
                     [run_id, __version__, source_type, root, site_url, library, folder,
@@ -102,6 +144,4 @@ def save_run(db_path: str | Path, result: dict, source_type: str, root: str,
     except Exception:
         con.execute("ROLLBACK")
         raise
-    finally:
-        con.close()
     return run_id

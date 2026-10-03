@@ -7,3 +7,6 @@ dist/
 .pytest_cache/
 pbi_profile_output/
 .idea/
+*.duckdb
+*.duckdb.wal
+sp_profile_output/

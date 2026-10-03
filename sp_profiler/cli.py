@@ -13,7 +13,7 @@ import sys
 from .profiler import profile
 from .report import write_outputs
 from .sources import CACHE_PATH, DEFAULT_CLIENT_ID, BrowserAuth, GraphSource, LocalSource
-from .store import save_run
+from .store import BlobSink, export_file, open_db, save_run
 from .stats import human_size
 
 
@@ -28,6 +28,8 @@ def main(argv=None) -> int:
         sp.add_argument("--ext", nargs="*", help="extensions to open (default: xlsx xlsm xltx xltm xls xlsb)")
         sp.add_argument("--scan-rows", type=int, default=50, help="rows scanned from the top to find the header row")
         sp.add_argument("--min-headers", type=int, default=3, help="min text cells for a row to count as header")
+        sp.add_argument("--no-content", action="store_true", help="do not store file bytes in DuckDB")
+        sp.add_argument("--max-content-mb", type=int, default=200, help="skip storing files larger than this")
         sp.add_argument("--excel-only", action="store_true", help="omit non-Excel files from the inventory")
 
     lo = sub.add_parser("local", help="local folder or OneDrive-synced SharePoint library")
@@ -44,7 +46,17 @@ def main(argv=None) -> int:
     g.add_argument("--logout", action="store_true", help="delete the cached sign-in and exit")
     common(g)
 
+    ex = sub.add_parser("export", help="write a stored file's bytes back out of DuckDB")
+    ex.add_argument("--db", default="sp_profile.duckdb")
+    ex.add_argument("--rel-path", required=True)
+    ex.add_argument("--dest", default=".")
+
     a = p.parse_args(argv)
+    if a.source == "export":
+        con = open_db(a.db)
+        print(export_file(con, a.rel_path, a.dest))
+        con.close()
+        return 0
     if a.source == "local":
         src, root, extra = LocalSource(a.path), str(LocalSource(a.path).root), {}
     else:
@@ -59,9 +71,12 @@ def main(argv=None) -> int:
     def progress(n, path):
         print(f"[{n}] {path}", file=sys.stderr, flush=True)
 
-    res = profile(src, a.ext, a.scan_rows, a.min_headers, not a.excel_only, progress)
-    run_id = save_run(a.db, res, a.source, root, params={"scan_rows": a.scan_rows, "ext": a.ext,
+    con = open_db(a.db)
+    sink = None if a.no_content else BlobSink(con, a.max_content_mb * 1024 * 1024)
+    res = profile(src, a.ext, a.scan_rows, a.min_headers, not a.excel_only, progress, sink)
+    run_id = save_run(con, res, a.source, root, params={"scan_rows": a.scan_rows, "ext": a.ext,
                                                        "min_headers": a.min_headers}, **extra)
+    con.close()
     paths = write_outputs(res, a.out) if a.out else {}
     s = res["summary"]
     print(f"\n{s['total_files']} files, {human_size(s['size_bytes'].get('sum', 0))}; "

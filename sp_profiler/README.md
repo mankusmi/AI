@@ -42,3 +42,20 @@ Optional `--out DIR` also writes CSV/JSON/HTML exports:
 * A file's *primary layout* is that of its sheet with the most data rows; files holding several layouts are counted.
 * `.xls`/`.xlsb` are inventoried but not opened; corrupt/encrypted files are flagged, not fatal.
 * Data row counts come from sheet dimensions (fast, can overcount formatted-but-empty rows).
+
+## Raw file content and export
+
+Excel bytes are stored in `file_blobs` (one row per distinct SHA-256, so duplicates cost nothing;
+`files.sha256` links to it). Disable with `--no-content`; files over `--max-content-mb` (default 200) are skipped.
+
+```bash
+sp-profile export --db profile.duckdb --rel-path "2024/Jan/claims.xlsx" --dest ./restored/
+```
+
+## Privacy / running locally
+
+Everything runs on your machine. The only network traffic is to Microsoft
+(`login.microsoftonline.com` for sign-in, `graph.microsoft.com` and SharePoint download URLs for files); the code has no
+telemetry and makes no calls to Anthropic or any other service. `local` mode uses no network at all.
+The DuckDB file contains your file contents and the token cache holds a refresh token: keep both out of git
+(`*.duckdb` is git-ignored) and treat them as confidential.
