@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .m2sql import Pipeline, Translator, describe_final, register_udfs
-from .mapping_load import target_table
+from .mapping_load import date_order_for_culture, target_table
 
 
 def dataflow_queries(con, dataflow_id: str) -> dict[str, str]:
@@ -26,21 +26,35 @@ def entity_tables(con, dataflow_id: str) -> dict[str, str]:
 
 
 def settings(con, entity: str) -> Optional[dict]:
-    r = con.execute("SELECT use_m, override_sql, accept_partial, extra_inputs FROM entity_transforms WHERE entity = ?",
-                    [entity]).fetchone()
-    return None if not r else {"use_m": r[0], "override_sql": r[1] or "", "accept_partial": bool(r[2]), "extra_inputs": r[3] or []}
+    r = con.execute("SELECT use_m, override_sql, accept_partial, extra_inputs, date_order FROM entity_transforms "
+                    "WHERE entity = ?", [entity]).fetchone()
+    return None if not r else {"use_m": r[0], "override_sql": r[1] or "", "accept_partial": bool(r[2]),
+                               "extra_inputs": r[3] or [], "date_order": r[4] or "auto"}
 
 
 def save_settings(con, dataflow_id: str, entity: str, use_m: bool, override_sql: str, accept_partial: bool,
-                  extra_inputs: list[str]) -> None:
+                  extra_inputs: list[str], date_order: str = "auto") -> None:
+    if date_order not in ("auto", "DMY", "MDY"):
+        raise ValueError("date_order must be auto, DMY or MDY")
     con.execute("DELETE FROM entity_transforms WHERE entity = ?", [entity])
-    con.execute("INSERT INTO entity_transforms (entity, dataflow_id, use_m, override_sql, accept_partial, extra_inputs) "
-                "VALUES (?, ?, ?, ?, ?, ?)", [entity, dataflow_id, use_m, override_sql.strip(), accept_partial, extra_inputs])
+    con.execute("INSERT INTO entity_transforms (entity, dataflow_id, use_m, override_sql, accept_partial, extra_inputs, "
+                "date_order) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [entity, dataflow_id, use_m, override_sql.strip(), accept_partial, extra_inputs, date_order])
+
+
+def date_order(con, dataflow_id: str, entity: str) -> tuple[str, str, str]:
+    """(order, culture, source): 'DMY'/'MDY' from the entity setting, else from the dataflow culture."""
+    st = settings(con, entity)
+    row = con.execute("SELECT culture FROM dataflows WHERE dataflow_id = ?", [dataflow_id]).fetchone()
+    culture = (row[0] if row else "") or ""
+    if st and st["date_order"] in ("DMY", "MDY"):
+        return st["date_order"], culture, "setting"
+    return date_order_for_culture(culture), culture, "culture"
 
 
 def translate(con, dataflow_id: str, entity: str) -> Pipeline:
     return Translator(dataflow_queries(con, dataflow_id), bindings(con, dataflow_id),
-                      entity_tables(con, dataflow_id)).translate(entity)
+                      entity_tables(con, dataflow_id), date_order(con, dataflow_id, entity)[0]).translate(entity)
 
 
 def resolve(con, dataflow_id: str, entity: str) -> dict:
@@ -50,7 +64,9 @@ def resolve(con, dataflow_id: str, entity: str) -> dict:
     has_m = bool(p.steps) or bool(p.error)
     use = (st["use_m"] if st else p.complete)            # no explicit choice: auto-on only if fully translated
     extra = (st or {}).get("extra_inputs", [])
+    order, culture, order_src = date_order(con, dataflow_id, entity)
     out = {"pipeline": p, "settings": st, "translated": p.complete, "use_m": bool(use), "mode": "attribute",
+           "date_order": order, "culture": culture, "date_order_source": order_src,
            "sql": None, "inputs": [], "status": "disabled", "generated_sql": p.sql() if len(p.ctes) > 1 else ""}
     if not use:
         return out

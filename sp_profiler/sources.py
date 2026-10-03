@@ -152,18 +152,41 @@ class GraphSource:
         self.site_url, self.folder, self.library = site_url, folder.strip("/"), library
         self.auth = auth or BrowserAuth()
         self.session = session or requests.Session()
+        self._sleep = time.sleep                      # replaceable in tests
         self.drive_id = self._resolve_drive()
 
     # graph helpers ---------------------------------------------------------
-    def _get(self, url: str) -> dict:
-        for attempt in range(5):
-            r = self.session.get(url, headers={"Authorization": f"Bearer {self.auth.token()}"}, timeout=60)
-            if r.status_code in (429, 503):               # throttled: honour Retry-After
-                time.sleep(int(r.headers.get("Retry-After", 2 ** attempt)))
+    RETRY_STATUS = (429, 500, 502, 503, 504)
+
+    def _request(self, url: str, stream: bool = False, authorize: bool = True, attempts: int = 5):
+        """GET with retries: throttling (429/5xx, honouring Retry-After) and transient network errors."""
+        import requests
+        last: Exception | None = None
+        for attempt in range(attempts):
+            headers = {"Authorization": f"Bearer {self.auth.token()}"} if authorize else {}
+            try:
+                r = self.session.get(url, headers=headers, stream=stream, timeout=(15, 300))
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last = e
+                self._sleep(min(2 ** attempt, 30))
                 continue
+            if r.status_code in self.RETRY_STATUS:
+                ra = r.headers.get("Retry-After", "")
+                wait = int(ra) if ra.isdigit() else min(2 ** attempt, 30)
+                r.close()
+                last = RuntimeError(f"HTTP {r.status_code} from {url.split('?')[0]}")
+                self._sleep(min(wait, 120))
+                continue
+            return r
+        raise RuntimeError(f"Giving up after {attempts} attempts: {last}")
+
+    def _get(self, url: str) -> dict:
+        r = self._request(url)
+        try:
             r.raise_for_status()
             return r.json()
-        r.raise_for_status()
+        finally:
+            r.close()
 
     def _resolve_drive(self) -> str:
         u = urlparse(self.site_url)
@@ -198,15 +221,20 @@ class GraphSource:
             path = Path(tmpdir) / item["name"]
             try:
                 url = item.get("@microsoft.graph.downloadUrl")
-                headers = {}
-                if not url:   # pre-authenticated URL must NOT get a bearer header; the /content one needs it
-                    url = f"{GRAPH}/drives/{self.drive_id}/items/{item['id']}/content"
-                    headers = {"Authorization": f"Bearer {self.auth.token()}"}
-                with self.session.get(url, headers=headers, stream=True, timeout=300) as r:
+                content_url = f"{GRAPH}/drives/{self.drive_id}/items/{item['id']}/content"
+                r = self._request(url or content_url, stream=True, authorize=not url)   # pre-signed URLs must not get a bearer
+                if url and r.status_code in (401, 403):          # signed link expired: ask Graph for a fresh one
+                    r.close()
+                    fresh = self._get(f"{GRAPH}/drives/{self.drive_id}/items/{item['id']}")
+                    r = self._request(fresh.get("@microsoft.graph.downloadUrl") or content_url, stream=True,
+                                      authorize=not fresh.get("@microsoft.graph.downloadUrl"))
+                try:
                     r.raise_for_status()
                     r.raw.decode_content = True
                     with open(path, "wb") as fh:
                         shutil.copyfileobj(r.raw, fh)
+                finally:
+                    r.close()
                 yield path
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)

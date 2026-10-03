@@ -74,9 +74,9 @@ sp-profile serve --db profile.duckdb      # prints http://127.0.0.1:8765/?t=<tok
    incl. `Policy No` ≈ `PolicyNumber`, reordered words and common abbreviations). Mappings are stored per layout in
    `column_mappings`, so every file sharing that layout is covered. **Load** appends rows from the stored file bytes into a
    typed table `df_<entity>` (dataflow types → DuckDB types; day-first date parsing; Excel serial dates; `1,200.50`/`(5)` numbers).
-   Unconvertible cells become NULL and are named in `_coerce_errors`. Provenance columns: `_load_id`, `_source_path`,
+   Unconvertible cells become NULL and are named in `_coerce_errors`. Text dates follow the dataflow's `culture` (en-US reads `06/02/2024` as 2 June, most others as 6 February); override it per entity on the panel. Dates that read validly either way are counted and reported after each load. Provenance columns: `_load_id`, `_source_path`,
    `_source_sha256`, `_sheet`, `_excel_row`, `_layout_hash`, `_loaded_utc`. The same content + sheet is never loaded twice
-   unless "force reload" is ticked; every sheet load is recorded in `load_log`. New attributes in a re-imported dataflow
+   unless "force reload" is ticked, which *replaces* that sheet's earlier rows (no duplicates); every sheet load is recorded in `load_log`. New attributes in a re-imported dataflow
    are added to the table with `ALTER TABLE`.
 4. **Query & profile** – SQL editor over the whole database (tables/views sidebar, Ctrl+Enter, CSV download). Only
    one SELECT/DESCRIBE/SHOW/SUMMARIZE/EXPLAIN statement runs unless "allow changes" is ticked. **Profile result** gives per-column
@@ -108,3 +108,13 @@ sheet; the result is converted to the entity's attribute types and appended to `
 * **Not supported (flagged):** Table.Group/Pivot/Unpivot/SplitColumn/CombineColumns, custom M functions, `try/otherwise`,
   fuzzy joins, parameters, merges against external sources. Type conversions follow the loader: day-first dates, `1,200.50`, `(5)`.
 * The conversion helpers are SQL macros `sp_dbl/sp_dec/sp_int/sp_ts/sp_bool/...` stored in the database, so they also work in the SQL console.
+
+## Reliability notes
+
+* Each sheet loads in its own transaction (rows + `load_log` entry, or nothing); a failed sheet is logged with its error and
+  retried on the next load. Loads of the same entity are serialised, so two clicks cannot double-load.
+* Rows are written through a temporary CSV (`INSERT ... SELECT FROM read_csv`), ~250x faster than row-by-row inserts; the temp file
+  holds your data for the duration of the insert and is deleted immediately afterwards.
+* Power Query semantics worth knowing: `Number.Round` defaults to round-half-to-even (as in Power Query); once a step types a
+  column, later comparisons and arithmetic use that type (so `[a] = [b]` on `1.0` and `1` is true).
+* SharePoint calls retry on throttling (429/5xx, honouring `Retry-After`) and network errors, and refresh expired download links.

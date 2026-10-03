@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import re
+import threading
 import uuid
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
@@ -24,7 +25,22 @@ DUCK_TYPES = {
 PROVENANCE = [("_load_id", "VARCHAR"), ("_source_path", "VARCHAR"), ("_source_sha256", "VARCHAR"),
               ("_sheet", "VARCHAR"), ("_excel_row", "INTEGER"), ("_layout_hash", "VARCHAR"),
               ("_loaded_utc", "TIMESTAMPTZ"), ("_coerce_errors", "VARCHAR")]
-DATE_FORMATS = ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d", "%d %b %Y", "%d-%b-%Y", "%d/%m/%y", "%m/%d/%Y")
+DMY_FORMATS = ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m-%y")
+MDY_FORMATS = ("%m/%d/%Y", "%m-%d-%Y", "%m.%d.%Y", "%m/%d/%y", "%m-%d-%y")
+OTHER_FORMATS = ("%Y/%m/%d", "%d %b %Y", "%d-%b-%Y", "%d %B %Y")
+AMBIGUOUS_RE = re.compile(r"^\s*(\d{1,2})[/.-](\d{1,2})[/.-]\d{2,4}")
+
+
+def date_order_for_culture(culture: str) -> str:
+    """'MDY' for US cultures (Power Query reads 06/02/2024 as 2 June there), otherwise 'DMY'."""
+    return "MDY" if (culture or "").lower().replace("_", "-") in ("en-us", "es-us", "en-ph", "fil-ph") else "DMY"
+
+
+def is_ambiguous_date(value) -> bool:
+    """True for text like 06/02/2024 that reads as a valid date in both day-first and month-first order."""
+    m = AMBIGUOUS_RE.match(value) if isinstance(value, str) else None
+    return bool(m) and int(m.group(1)) <= 12 and int(m.group(2)) <= 12 and m.group(1) != m.group(2) \
+        and int(m.group(1)) >= 1 and int(m.group(2)) >= 1
 
 
 def quote_ident(name: str) -> str:
@@ -64,7 +80,7 @@ def _excel_serial(v: float) -> Optional[datetime]:
     return None
 
 
-def _to_datetime(v) -> Optional[datetime]:
+def _to_datetime(v, order: str = "DMY") -> Optional[datetime]:
     if isinstance(v, datetime):
         return v
     if isinstance(v, date):
@@ -78,7 +94,8 @@ def _to_datetime(v) -> Optional[datetime]:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         pass
-    for fmt in DATE_FORMATS:         # day-first by default: bordereaux are mostly UK/EU formatted
+    first, second = (MDY_FORMATS, DMY_FORMATS) if order == "MDY" else (DMY_FORMATS, MDY_FORMATS)
+    for fmt in first + second + OTHER_FORMATS:       # preferred order first; the other only if that cannot parse
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
@@ -97,7 +114,7 @@ def _to_decimal(v) -> Decimal:
     return -d if neg else d
 
 
-def coerce(value, data_type: str):
+def coerce(value, data_type: str, date_order: str = "DMY"):
     """Return ``(converted, ok)``. Empty values give ``(None, True)``; unparseable ones ``(None, False)``."""
     if value is None or (isinstance(value, str) and not value.strip()):
         return None, True
@@ -124,14 +141,14 @@ def coerce(value, data_type: str):
                 return False, True
             return None, False
         if dt in ("datetime", "datetimeoffset"):
-            d = _to_datetime(value)
+            d = _to_datetime(value, date_order)
             if d is None:
                 return None, False
             if dt == "datetimeoffset" and d.tzinfo is None:
                 d = d.replace(tzinfo=timezone.utc)
             return d, True
         if dt == "date":
-            d = _to_datetime(value)
+            d = _to_datetime(value, date_order)
             return (d.date(), True) if d else (None, False)
         if dt == "time":
             if isinstance(value, time):
@@ -216,7 +233,7 @@ def _norm_header_cells(header):
     return [normalise_header(c) if c is not None and str(c).strip() else f"<blank{i + 1}>" for i, c in enumerate(header)]
 
 
-def _rows_attribute_mode(con, entity, w, blob, col_names, types):
+def _rows_attribute_mode(con, entity, w, blob, col_names, types, order, stats):
     mapping = dict(con.execute("SELECT norm_header, attribute FROM column_mappings WHERE entity = ? AND layout_hash = ? "
                                "AND kind = 'attribute'", [entity, w["layout_hash"]]).fetchall())
     mapping = {h: a for h, a in mapping.items() if a in types}      # drop attrs gone from this dataflow
@@ -225,6 +242,7 @@ def _rows_attribute_mode(con, entity, w, blob, col_names, types):
     for i, h in enumerate(_norm_header_cells(header)):
         if h in mapping and mapping[h] not in col_for:
             col_for[mapping[h]] = i
+    date_cols = {n for n in col_names if str(types[n]).lower() in ("datetime", "datetimeoffset", "date")}
     for k, row in rows:
         raws = []
         for name in col_names:
@@ -235,17 +253,19 @@ def _rows_attribute_mode(con, entity, w, blob, col_names, types):
             continue
         vals, errs = [], []
         for name, raw in zip(col_names, raws):
-            v, ok = coerce(raw, types[name])
+            if name in date_cols and is_ambiguous_date(raw):
+                stats["ambiguous_dates"] += 1
+            v, ok = coerce(raw, types[name], order)
             vals.append(v)
             if not ok:
                 errs.append(name)
         yield k, vals, errs
 
 
-def _rows_m_mode(con, entity, w, blob, plan, col_names, types, batch=20000):
+def _rows_m_mode(con, entity, w, blob, plan, col_names, types, stats):
     """Run the translated Power Query pipeline over one sheet (staged as VARCHAR columns)."""
     from .m2sql import stage_table, stage_value
-    inputs = plan["inputs"]
+    inputs, order = plan["inputs"], plan["date_order"]
     mapping = dict(con.execute("SELECT norm_header, attribute FROM column_mappings WHERE entity = ? AND layout_hash = ? "
                                "AND kind = 'input'", [entity, w["layout_hash"]]).fetchall())
     header, rows = _sheet_rows(blob, w["sheet"], w["header_row"])
@@ -259,6 +279,7 @@ def _rows_m_mode(con, entity, w, blob, plan, col_names, types, batch=20000):
         if all(v is None or not v.strip() for v in vals):
             empty += 1
             continue
+        stats["ambiguous_dates"] += sum(1 for v in vals if is_ambiguous_date(v))
         staged.append((k, *vals))
     stage_table(con, inputs, staged)
     res = con.execute(plan["sql"])
@@ -272,22 +293,39 @@ def _rows_m_mode(con, entity, w, blob, plan, col_names, types, batch=20000):
         vals, errs = [], []
         for name in col_names:
             i = idx.get(name.lower())
-            v, ok = coerce(r[i] if i is not None else None, types[name])
+            v, ok = coerce(r[i] if i is not None else None, types[name], order)
             vals.append(v)
             if not ok:
                 errs.append(name)
         yield (r[row_i] if row_i is not None else None), vals, errs
 
 
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _entity_lock(entity: str) -> threading.Lock:
+    """One lock per entity so two concurrent loads cannot both decide the same sheet is pending."""
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(entity, threading.Lock())
+
+
 def load_entity(con, dataflow_id: str, entity: str, layout_hashes: Optional[list[str]] = None,
                 force: bool = False, progress: Optional[Callable[[int, int, str], None]] = None,
-                batch: int = 5000) -> dict:
+                batch: int = 50_000) -> dict:
     """Append rows for ``entity`` from every pending stored sheet. Returns a summary dict.
 
-    Uses the translated Power Query pipeline when the entity has one enabled, otherwise the plain
-    column-to-attribute mapping.
+    Each sheet is loaded in its own transaction (all rows plus the log entry, or nothing). Reloading a
+    sheet (``force``) replaces the rows previously loaded from it instead of duplicating them. Uses the
+    translated Power Query pipeline when the entity has one enabled, otherwise the plain mapping.
     """
+    with _entity_lock(entity):
+        return _load_entity(con, dataflow_id, entity, layout_hashes, force, progress, batch)
+
+
+def _load_entity(con, dataflow_id, entity, layout_hashes, force, progress, batch) -> dict:
     from . import transforms
+    from .bulk import bulk_insert
     from .m2sql import register_udfs
     attrs = [{"name": r[0], "data_type": r[1]} for r in con.execute(
         "SELECT name, data_type FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ? ORDER BY position",
@@ -298,27 +336,35 @@ def load_entity(con, dataflow_id: str, entity: str, layout_hashes: Optional[list
     if plan["use_m"] and plan["mode"] != "m":
         raise ValueError(f"Power Query transformation for {entity!r} is not ready ({plan['status']})")
     kind = "input" if plan["mode"] == "m" else "attribute"
-    if kind == "input":
-        register_udfs(con)
+    register_udfs(con)
     table = ensure_target_table(con, entity, attrs)
     types = {a["name"]: a["data_type"] for a in attrs}
     col_names = [a["name"] for a in attrs]
+    all_cols = col_names + [p[0] for p in PROVENANCE]
+    order = plan["date_order"]
     load_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:6]
     work = pending_sheets(con, entity, layout_hashes, force, kind)
     total = {"load_id": load_id, "table": table, "sheets_loaded": 0, "sheets_failed": 0, "mode": plan["mode"],
-             "rows": 0, "coerce_error_cells": 0, "sheets_planned": len(work)}
-    insert_sql = (f"INSERT INTO {quote_ident(table)} ({', '.join(quote_ident(c) for c in col_names + [p[0] for p in PROVENANCE])}) "
-                  f"VALUES ({', '.join('?' for _ in col_names + PROVENANCE)})")
+             "rows": 0, "coerce_error_cells": 0, "sheets_planned": len(work), "date_order": order,
+             "ambiguous_dates": 0, "replaced_rows": 0}
+    log_sql = "INSERT INTO load_log VALUES (?, ?, ?, ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     for n, w in enumerate(work, 1):
         if progress:
             progress(n, len(work), f"{w['rel_path']} [{w['sheet']}]")
         started = datetime.now(timezone.utc)
-        loaded = empty = bad = 0
-        status, err = "ok", ""
+        loaded = empty = bad = replaced = 0
+        stats = {"ambiguous_dates": 0}
+        err = ""
+        con.execute("BEGIN")
         try:
             blob = bytes(con.execute("SELECT content FROM file_blobs WHERE sha256 = ?", [w["sha256"]]).fetchone()[0])
-            gen = (_rows_m_mode(con, entity, w, blob, plan, col_names, types) if kind == "input"
-                   else _rows_attribute_mode(con, entity, w, blob, col_names, types))
+            replaced = con.execute(f"SELECT count(*) FROM {quote_ident(table)} WHERE _source_sha256 = ? AND _sheet = ?",
+                                   [w["sha256"], w["sheet"]]).fetchone()[0]
+            if replaced:
+                con.execute(f"DELETE FROM {quote_ident(table)} WHERE _source_sha256 = ? AND _sheet = ?",
+                            [w["sha256"], w["sheet"]])
+            gen = (_rows_m_mode(con, entity, w, blob, plan, col_names, types, stats) if kind == "input"
+                   else _rows_attribute_mode(con, entity, w, blob, col_names, types, order, stats))
             buf = []
             for k, vals, errs in gen:
                 if vals is None:
@@ -328,25 +374,26 @@ def load_entity(con, dataflow_id: str, entity: str, layout_hashes: Optional[list
                 buf.append(vals + [load_id, w["rel_path"], w["sha256"], w["sheet"], k, w["layout_hash"],
                                    started, ",".join(errs) or None])
                 if len(buf) >= batch:
-                    con.executemany(insert_sql, buf)
-                    loaded += len(buf)
+                    loaded += bulk_insert(con, table, all_cols, buf)
                     buf = []
-            if buf:
-                con.executemany(insert_sql, buf)
-                loaded += len(buf)
+            loaded += bulk_insert(con, table, all_cols, buf)
+            con.execute("UPDATE load_log SET status = 'superseded' WHERE entity = ? AND source_sha256 = ? "
+                        "AND sheet = ? AND status = 'ok'", [entity, w["sha256"], w["sheet"]])
+            con.execute(log_sql, [load_id, entity, dataflow_id, started, w["sha256"], w["rel_path"], w["sheet"],
+                                  w["layout_hash"], loaded, empty, bad, "ok", ""])
+            con.execute("COMMIT")
         except Exception as e:
-            status, err = "error", f"{type(e).__name__}: {e}"
-        if status == "error":
-            # remove partial rows from this sheet so a retry does not duplicate them
-            con.execute(f"DELETE FROM {quote_ident(table)} WHERE _load_id = ? AND _source_sha256 = ? AND _sheet = ?",
-                        [load_id, w["sha256"], w["sheet"]])
-            loaded = 0
+            err = f"{type(e).__name__}: {e}"
+            con.execute("ROLLBACK")                       # no partial rows, no log entry for this sheet
+            loaded = replaced = 0
+            con.execute(log_sql, [load_id, entity, dataflow_id, started, w["sha256"], w["rel_path"], w["sheet"],
+                                  w["layout_hash"], 0, 0, 0, "error", err])
+        if err:
             total["sheets_failed"] += 1
         else:
             total["sheets_loaded"] += 1
+            total["ambiguous_dates"] += stats["ambiguous_dates"]
         total["rows"] += loaded
+        total["replaced_rows"] += replaced
         total["coerce_error_cells"] += bad
-        con.execute("INSERT INTO load_log VALUES (?, ?, ?, ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    [load_id, entity, dataflow_id, started, w["sha256"], w["rel_path"], w["sheet"], w["layout_hash"],
-                     loaded, empty, bad, status, err])
     return total

@@ -103,13 +103,14 @@ def test_map_load_append_and_idempotent(env):
     rows = con.execute("select PolicyNumber, InceptionDate, GrossPremium, Units, Active, _coerce_errors, _excel_row "
                        "from df_policies order by PolicyNumber").fetchall()
     assert rows[0][0] == "P1" and rows[0][2] == Decimal("100.5000000000") and rows[0][4] is True
-    assert rows[1][3] is None and rows[1][5] == "Units" and rows[1][1] == datetime(2024, 2, 6)
+    assert rows[1][3] is None and rows[1][5] == "Units" and rows[1][1] == datetime(2024, 6, 2)   # en-US culture: month first
     assert rows[2][2] == Decimal(50)                       # b.xlsx 'Premium (Gross)' fuzzy-mapped
     again = ml.load_entity(con, did, "Policies")
     assert again["rows"] == 0 and again["sheets_planned"] == 0   # idempotent
     forced = ml.load_entity(con, did, "Policies", force=True)
-    assert forced["rows"] == 3
-    assert con.execute("select count(*) from df_policies").fetchone()[0] == 6   # appended
+    assert forced["rows"] == 3 and forced["replaced_rows"] == 3
+    assert con.execute("select count(*) from df_policies").fetchone()[0] == 3   # replaced, not duplicated
+    assert con.execute("select count(*) from load_log where status = 'superseded'").fetchone()[0] == 2
 
 
 def test_sql_guard_and_profile(env):

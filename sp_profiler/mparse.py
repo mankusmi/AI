@@ -184,9 +184,12 @@ class Parser:
     def is_expr(self):
         left = self.eq_expr()
         while self.at("kw", "is") or self.at("kw", "as"):
+            is_test = self.at("kw", "is")
             self.i += 1
             self.accept("id", "nullable")
-            self.eat("id")           # type name is ignored: `x as text`, `x is null`
+            name = self.eat("kw", "null") if self.at("kw", "null") else self.eat("id")
+            if is_test:                      # `x as text` assertions are ignored; `x is T` becomes a node
+                left = {"t": "is", "e": left, "type": name}
         return left
 
     def eq_expr(self):

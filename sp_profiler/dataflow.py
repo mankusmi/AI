@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS column_mappings (
     updated_utc TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (entity, layout_hash, norm_header, kind));
 CREATE TABLE IF NOT EXISTS entity_transforms (
     entity VARCHAR PRIMARY KEY, dataflow_id VARCHAR, use_m BOOLEAN, override_sql VARCHAR,
-    accept_partial BOOLEAN DEFAULT FALSE, extra_inputs VARCHAR[], updated_utc TIMESTAMPTZ DEFAULT now());
+    accept_partial BOOLEAN DEFAULT FALSE, extra_inputs VARCHAR[], updated_utc TIMESTAMPTZ DEFAULT now(),
+    date_order VARCHAR DEFAULT 'auto');
 CREATE TABLE IF NOT EXISTS query_bindings (
     dataflow_id VARCHAR, query_name VARCHAR, table_name VARCHAR, PRIMARY KEY (dataflow_id, query_name));
 """
@@ -33,6 +34,10 @@ CREATE TABLE IF NOT EXISTS query_bindings (
 
 def migrate(con) -> None:
     """Upgrade databases created before ``column_mappings.kind`` existed."""
+    et = [r[0] for r in con.execute("SELECT column_name FROM information_schema.columns "
+                                    "WHERE table_name = 'entity_transforms'").fetchall()]
+    if et and "date_order" not in et:
+        con.execute("ALTER TABLE entity_transforms ADD COLUMN date_order VARCHAR DEFAULT 'auto'")
     cols = [r[0] for r in con.execute("SELECT column_name FROM information_schema.columns "
                                       "WHERE table_name = 'column_mappings'").fetchall()]
     if cols and "kind" not in cols:

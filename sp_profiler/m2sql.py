@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .mapping_load import coerce
+from .mapping_load import date_order_for_culture
 from .mparse import MParseError, parse_expr
 
 
@@ -38,7 +38,19 @@ def slug(s: str) -> str:
 
 # ----------------------------------------------------------------------------- conversion macros
 # Pure-SQL macros (not Python UDFs: those crash DuckDB when called from server threads). They mirror
-# mapping_load.coerce(): thousands separators, currency symbols, (negatives), day-first dates, Excel serials.
+# mapping_load.coerce(): thousands separators, currency symbols, (negatives), culture-ordered dates, Excel serials.
+def _ts_macro(name: str, preferred: list[str], fallback: list[str]) -> str:
+    return (f"""CREATE OR REPLACE MACRO {name}(x) AS CASE
+        WHEN x IS NULL OR trim(x) = '' THEN NULL
+        WHEN regexp_matches(trim(x), '^[0-9]{{5}}(\\.[0-9]+)?$')
+            THEN TIMESTAMP '1899-12-30' + to_seconds(CAST(round(CAST(trim(x) AS DOUBLE) * 86400) AS BIGINT))
+        WHEN regexp_matches(trim(x), '^[0-9]{{1,2}}[/.-][0-9]{{1,2}}[/.-][0-9]{{2,4}}')
+            THEN COALESCE(try_strptime(trim(x), [{', '.join(preferred)}]),
+                          try_strptime(trim(x), [{', '.join(fallback)}]))
+        ELSE COALESCE(TRY_CAST(trim(x) AS TIMESTAMP),
+                      try_strptime(trim(x), ['%Y/%m/%d', '%d %b %Y', '%d-%b-%Y', '%d %B %Y'])) END""")
+
+
 _NUM = r"""CASE WHEN regexp_matches(trim(x), '^\(.*\)$')
         THEN '-' || regexp_replace(trim(x), '[()\s,£$€]', '', 'g')
         ELSE regexp_replace(trim(x), '[\s,£$€]', '', 'g') END"""
@@ -47,17 +59,13 @@ MACROS = [
     f"CREATE OR REPLACE MACRO sp_dec(x) AS TRY_CAST({_NUM} AS DECIMAL(38,10))",
     "CREATE OR REPLACE MACRO sp_int(x) AS CASE WHEN sp_dec(x) IS NOT NULL AND sp_dec(x) = floor(sp_dec(x)) "
     "THEN CAST(sp_dec(x) AS BIGINT) END",
-    r"""CREATE OR REPLACE MACRO sp_ts(x) AS CASE
-        WHEN x IS NULL OR trim(x) = '' THEN NULL
-        WHEN regexp_matches(trim(x), '^[0-9]{5}(\.[0-9]+)?$')
-            THEN TIMESTAMP '1899-12-30' + to_seconds(CAST(round(CAST(trim(x) AS DOUBLE) * 86400) AS BIGINT))
-        WHEN regexp_matches(trim(x), '^[0-9]{1,2}[/.-][0-9]{1,2}[/.-][0-9]{2,4}')
-            THEN COALESCE(try_strptime(trim(x), ['%d/%m/%Y', '%d-%m-%Y', '%d.%m.%Y', '%d/%m/%y', '%d-%m-%y',
-                                                  '%d/%m/%Y %H:%M:%S', '%d/%m/%Y %H:%M']),
-                          try_strptime(trim(x), ['%m/%d/%Y', '%m-%d-%Y']))
-        ELSE COALESCE(TRY_CAST(trim(x) AS TIMESTAMP),
-                      try_strptime(trim(x), ['%Y/%m/%d', '%d %b %Y', '%d-%b-%Y', '%d %B %Y'])) END""",
-    "CREATE OR REPLACE MACRO sp_tstz(x) AS CAST(sp_ts(x) AS TIMESTAMPTZ)",
+    _ts_macro("sp_ts_dmy", ["'%d/%m/%Y'", "'%d-%m-%Y'", "'%d.%m.%Y'", "'%d/%m/%y'", "'%d-%m-%y'", "'%d/%m/%Y %H:%M:%S'", "'%d/%m/%Y %H:%M'"],
+              ["'%m/%d/%Y'", "'%m-%d-%Y'"]),
+    _ts_macro("sp_ts_mdy", ["'%m/%d/%Y'", "'%m-%d-%Y'", "'%m.%d.%Y'", "'%m/%d/%y'", "'%m-%d-%y'", "'%m/%d/%Y %H:%M:%S'", "'%m/%d/%Y %H:%M'"],
+              ["'%d/%m/%Y'", "'%d-%m-%Y'"]),
+    "CREATE OR REPLACE MACRO sp_ts(x) AS sp_ts_dmy(x)",
+    "CREATE OR REPLACE MACRO sp_tstz_dmy(x) AS CAST(sp_ts_dmy(x) AS TIMESTAMPTZ)",
+    "CREATE OR REPLACE MACRO sp_tstz_mdy(x) AS CAST(sp_ts_mdy(x) AS TIMESTAMPTZ)",
     "CREATE OR REPLACE MACRO sp_bool(x) AS CASE lower(trim(x)) WHEN 'true' THEN TRUE WHEN 'yes' THEN TRUE "
     "WHEN 'y' THEN TRUE WHEN '1' THEN TRUE WHEN 'false' THEN FALSE WHEN 'no' THEN FALSE WHEN 'n' THEN FALSE "
     "WHEN '0' THEN FALSE END",
@@ -72,18 +80,35 @@ def register_udfs(cur) -> None:
         cur.execute(ddl)
 
 
+def _plain(fn):
+    return lambda x, order: fn(x)
+
+
+def _date_cast(x, order):
+    return f"CAST(sp_ts_{order.lower()}(CAST({x} AS VARCHAR)) AS DATE)"
+
+
+def _ts_cast(x, order):
+    return f"sp_ts_{order.lower()}(CAST({x} AS VARCHAR))"
+
+
+def _tstz_cast(x, order):
+    return f"sp_tstz_{order.lower()}(CAST({x} AS VARCHAR))"
+
+
+_dbl = _plain(lambda x: f"sp_dbl(CAST({x} AS VARCHAR))")
+_int = _plain(lambda x: f"sp_int(CAST({x} AS VARCHAR))")
+_dec = _plain(lambda x: f"sp_dec(CAST({x} AS VARCHAR))")
 TYPE_SQL = {
-    "text": lambda x: f"CAST({x} AS VARCHAR)",
-    "number": lambda x: f"sp_dbl(CAST({x} AS VARCHAR))", "Number.Type": lambda x: f"sp_dbl(CAST({x} AS VARCHAR))",
-    "Percentage.Type": lambda x: f"sp_dbl(CAST({x} AS VARCHAR))",
-    "Int64.Type": lambda x: f"sp_int(CAST({x} AS VARCHAR))", "Int32.Type": lambda x: f"sp_int(CAST({x} AS VARCHAR))",
-    "Int16.Type": lambda x: f"sp_int(CAST({x} AS VARCHAR))",
-    "Currency.Type": lambda x: f"sp_dec(CAST({x} AS VARCHAR))", "Decimal.Type": lambda x: f"sp_dec(CAST({x} AS VARCHAR))",
-    "date": lambda x: f"CAST(sp_ts(CAST({x} AS VARCHAR)) AS DATE)", "Date.Type": lambda x: f"CAST(sp_ts(CAST({x} AS VARCHAR)) AS DATE)",
-    "datetime": lambda x: f"sp_ts(CAST({x} AS VARCHAR))", "DateTime.Type": lambda x: f"sp_ts(CAST({x} AS VARCHAR))",
-    "datetimezone": lambda x: f"sp_tstz(CAST({x} AS VARCHAR))", "DateTimeZone.Type": lambda x: f"sp_tstz(CAST({x} AS VARCHAR))",
-    "logical": lambda x: f"sp_bool(CAST({x} AS VARCHAR))", "Logical.Type": lambda x: f"sp_bool(CAST({x} AS VARCHAR))",
-    "any": lambda x: x,
+    "text": _plain(lambda x: f"CAST({x} AS VARCHAR)"),
+    "number": _dbl, "Number.Type": _dbl, "Percentage.Type": _dbl,
+    "Int64.Type": _int, "Int32.Type": _int, "Int16.Type": _int,
+    "Currency.Type": _dec, "Decimal.Type": _dec,
+    "date": _date_cast, "Date.Type": _date_cast, "datetime": _ts_cast, "DateTime.Type": _ts_cast,
+    "datetimezone": _tstz_cast, "DateTimeZone.Type": _tstz_cast,
+    "logical": _plain(lambda x: f"sp_bool(CAST({x} AS VARCHAR))"),
+    "Logical.Type": _plain(lambda x: f"sp_bool(CAST({x} AS VARCHAR))"),
+    "any": _plain(lambda x: x),
 }
 TYPE_KIND = {"text": "text", "number": "num", "Number.Type": "num", "Percentage.Type": "num", "Int64.Type": "num",
              "Int32.Type": "num", "Int16.Type": "num", "Currency.Type": "num", "Decimal.Type": "num",
@@ -97,11 +122,11 @@ def type_name(node) -> str:
     raise Unsupported("unsupported type expression")
 
 
-def cast_type(sql: str, tname: str) -> str:
+def cast_type(sql: str, tname: str, order: str = "DMY") -> str:
     fn = TYPE_SQL.get(tname)
     if not fn:
         raise Unsupported(f"unsupported column type {tname!r}")
-    return fn(sql)
+    return fn(sql, order)
 
 
 # ----------------------------------------------------------------------------- relations
@@ -114,6 +139,7 @@ class Rel:
     has_row: bool = True                          # carries the "__row" provenance column
     raw: bool = False                             # still an un-promoted source (navigation / skip steps)
     nested: dict = field(default_factory=dict)    # NestedJoin columns waiting for ExpandTableColumn
+    kinds: dict = field(default_factory=dict)     # column -> num/text/date/bool once a step has typed it
 
 
 @dataclass
@@ -142,7 +168,8 @@ class Translator:
     """Builds the CTE chain for one entity query, resolving lookups against other queries."""
 
     def __init__(self, queries: dict[str, str], bindings: dict[str, str] | None = None,
-                 entity_tables: dict[str, str] | None = None):
+                 entity_tables: dict[str, str] | None = None, date_order: str = "DMY"):
+        self.order = date_order
         self.query_src = queries
         self.queries: dict[str, dict] = {}
         self.parse_errors: dict[str, str] = {}
@@ -329,7 +356,13 @@ class Translator:
                 raise Unsupported("inline table row does not match its column count")
             rows.append("(" + ", ".join(self._const_sql(v) for v in r["items"]) + ")")
         sql = f"SELECT * FROM (VALUES {', '.join(rows)}) AS t({', '.join(q(c) for c in cols)})"
-        return self._emit("inline", sql, known=set(cols), open=False, has_row=False)
+        kinds = {}
+        for i, c in enumerate(cols):
+            ks = {r["items"][i]["kind"] for r in rows_node["items"] if r["items"][i]["t"] == "lit"
+                  and r["items"][i]["kind"] != "null"}
+            if len(ks) == 1 and ks <= {"str", "num", "bool"}:
+                kinds[c] = {"str": "text", "num": "num", "bool": "bool"}[ks.pop()]
+        return self._emit("inline", sql, known=set(cols), open=False, has_row=False, kinds=kinds)
 
     def _const_str(self, n) -> str:
         if n["t"] == "lit" and n["kind"] == "str":
@@ -386,7 +419,7 @@ class Translator:
 
     def _same(self, rel: Rel, sql_body: str, hint: str, **over) -> Rel:
         new = self._emit(hint, sql_body, known=set(rel.known), open=rel.open, from_src=rel.from_src,
-                         has_row=rel.has_row)
+                         has_row=rel.has_row, kinds=dict(rel.kinds))
         for k, v in over.items():
             setattr(new, k, v)
         return new
@@ -439,6 +472,8 @@ class Translator:
         new = self._same(rel, sql, "rename")
         olds = {o for o, _ in pairs}
         new.known = (rel.known - olds) | {n for _, n in pairs}
+        ren = dict(pairs)
+        new.kinds = {ren.get(c, c): k for c, k in rel.kinds.items()}
         return new
 
     def f_Table_RemoveColumns(self, args, scope, main, qname):
@@ -452,6 +487,7 @@ class Translator:
             return rel
         new = self._same(rel, f"SELECT * EXCLUDE ({', '.join(q(c) for c in cols)}) FROM {q(rel.cte)}", "remove")
         new.known = rel.known - set(cols)
+        new.kinds = {c: k for c, k in rel.kinds.items() if c not in cols}
         return new
 
     def f_Table_SelectColumns(self, args, scope, main, qname):
@@ -462,22 +498,32 @@ class Translator:
         self._use(rel, cols, "SelectColumns", main)
         sel = [q(c) for c in cols] + ([q("__row")] if rel.has_row else [])
         return self._emit("select", f"SELECT {', '.join(sel)} FROM {q(rel.cte)}", known=set(cols), open=False,
-                          from_src=rel.from_src, has_row=rel.has_row)
+                          from_src=rel.from_src, has_row=rel.has_row,
+                          kinds={c: k for c, k in rel.kinds.items() if c in cols})
 
     def f_Table_TransformColumnTypes(self, args, scope, main, qname):
         rel = self._src_arg(args, scope, main, qname)
-        reps = []
+        reps, kinds = [], dict(rel.kinds)
+        order = date_order_for_culture(args[2]["v"]) if len(args) > 2 and args[2]["t"] == "lit" \
+            and args[2]["kind"] == "str" else self.order
         for it in self._pairs(args[1]):
             col = self._const_str(it[0])
             self._use(rel, [col], "TransformColumnTypes", main)
-            reps.append(f"{cast_type(q(col), type_name(it[1]))} AS {q(col)}")
+            tname = type_name(it[1])
+            reps.append(f"{cast_type(q(col), tname, order)} AS {q(col)}")
+            if TYPE_KIND.get(tname):
+                kinds[col] = TYPE_KIND[tname]
+            else:
+                kinds.pop(col, None)
         if not reps:
             return rel
-        return self._same(rel, f"SELECT * REPLACE ({', '.join(reps)}) FROM {q(rel.cte)}", "types")
+        new = self._same(rel, f"SELECT * REPLACE ({', '.join(reps)}) FROM {q(rel.cte)}", "types")
+        new.kinds = kinds
+        return new
 
     def f_Table_TransformColumns(self, args, scope, main, qname):
         rel = self._src_arg(args, scope, main, qname)
-        reps = []
+        reps, kinds = [], dict(rel.kinds)
         for it in self._pairs(args[1]):
             col = self._const_str(it[0])
             self._use(rel, [col], "TransformColumns", main)
@@ -492,9 +538,16 @@ class Translator:
             else:
                 raise Unsupported("unsupported transformation function")
             if len(it) > 2:
-                val = cast_type(val, type_name(it[2]))
+                tname = type_name(it[2])
+                val, kind = cast_type(val, tname, self.order), TYPE_KIND.get(tname, "unknown")
+            if kind in ("num", "text", "date", "bool"):
+                kinds[col] = kind
+            else:
+                kinds.pop(col, None)
             reps.append(f"{val} AS {q(col)}")
-        return self._same(rel, f"SELECT * REPLACE ({', '.join(reps)}) FROM {q(rel.cte)}", "transform")
+        new = self._same(rel, f"SELECT * REPLACE ({', '.join(reps)}) FROM {q(rel.cte)}", "transform")
+        new.kinds = kinds
+        return new
 
     def f_Table_AddColumn(self, args, scope, main, qname):
         rel = self._src_arg(args, scope, main, qname)
@@ -506,11 +559,16 @@ class Translator:
             body, bind = fn["body"], None
         else:
             raise Unsupported("AddColumn needs an `each` expression")
-        val, _ = self._ex(rel, main).sql(body, bind=bind)
+        val, kind = self._ex(rel, main).sql(body, bind=bind)
         if len(args) > 3 and args[3]["t"] in ("type", "id"):
-            val = cast_type(val, type_name(args[3]))
+            tname = type_name(args[3])
+            val, kind = cast_type(val, tname, self.order), TYPE_KIND.get(tname, "unknown")
         new = self._same(rel, f"SELECT *, {val} AS {q(name)} FROM {q(rel.cte)}", "add")
         new.known = rel.known | {name}
+        if kind in ("num", "text", "date", "bool"):
+            new.kinds[name] = kind
+        else:
+            new.kinds.pop(name, None)
         return new
 
     def f_Table_ReplaceValue(self, args, scope, main, qname):
@@ -533,7 +591,10 @@ class Translator:
                 reps.append(f"CASE WHEN {cond} THEN {nv} ELSE {col} END AS {col}")
             else:
                 raise Unsupported(f"replacer {replacer or '?'} is not supported")
-        return self._same(rel, f"SELECT * REPLACE ({', '.join(reps)}) FROM {q(rel.cte)}", "replace")
+        new = self._same(rel, f"SELECT * REPLACE ({', '.join(reps)}) FROM {q(rel.cte)}", "replace")
+        if replacer == "Replacer.ReplaceText":
+            new.kinds.update({c: "text" for c in cols})
+        return new
 
     def f_Table_SelectRows(self, args, scope, main, qname):
         rel = self._src_arg(args, scope, main, qname)
@@ -593,8 +654,9 @@ class Translator:
         rels = [self._rel(i, scope, main, qname) for i in args[0]["items"]]
         parts = [f"SELECT * {('EXCLUDE (' + q('__row') + ') ') if r.has_row else ''}FROM {q(r.cte)}" for r in rels]
         known = set().union(*[r.known for r in rels])
+        kinds = {c: k for c, k in rels[0].kinds.items() if all(r.kinds.get(c) == k for r in rels)}
         return self._emit("combine", " UNION ALL BY NAME ".join(parts), known=known, open=any(r.open for r in rels),
-                          from_src=any(r.from_src for r in rels), has_row=False)
+                          from_src=any(r.from_src for r in rels), has_row=False, kinds=kinds)
 
     _KINDS = {"JoinKind.LeftOuter": "LEFT", "JoinKind.Inner": "INNER", "JoinKind.RightOuter": "RIGHT",
               "JoinKind.FullOuter": "FULL"}
@@ -617,7 +679,7 @@ class Translator:
         self._use(right, k2, "NestedJoin", main)
         newcol = self._const_str(args[4])
         kind = self._join_kind(args, 5, "LEFT")   # NestedJoin defaults to LeftOuter
-        out = Rel(left.cte, set(left.known), left.open, left.from_src, left.has_row)
+        out = Rel(left.cte, set(left.known), left.open, left.from_src, left.has_row, kinds=dict(left.kinds))
         out.nested = {**left.nested, newcol: (right, k1, k2, kind)}
         return out
 
@@ -633,7 +695,9 @@ class Translator:
         on = " AND ".join(f"CAST(l.{q(a)} AS VARCHAR) = CAST(r.{q(b)} AS VARCHAR)" for a, b in zip(k1, k2))
         sel = ", ".join(f"r.{q(c)} AS {q(n)}" for c, n in zip(cols, names))
         sql = f"SELECT l.*, {sel} FROM {q(rel.cte)} l {kind} JOIN {q(right.cte)} r ON {on}"
-        new = self._emit("lookup", sql, known=rel.known | set(names), open=rel.open, from_src=rel.from_src, has_row=rel.has_row)
+        kinds = {**rel.kinds, **{n: right.kinds[c] for c, n in zip(cols, names) if c in right.kinds}}
+        new = self._emit("lookup", sql, known=rel.known | set(names), open=rel.open, from_src=rel.from_src,
+                         has_row=rel.has_row, kinds=kinds)
         new.nested = {k: v for k, v in rel.nested.items() if k != col}
         return new
 
@@ -650,7 +714,7 @@ class Translator:
         exr = f" EXCLUDE ({', '.join(q(c) for c in excl + ([ '__row'] if rrow else []))})" if (excl or rrow) else ""
         return self._emit("join", f"SELECT l.*, r.*{exr} FROM {q(left.cte)} l {kind} JOIN {q(right.cte)} r ON {on}",
                           known=left.known | right.known, open=left.open or right.open, from_src=left.from_src,
-                          has_row=left.has_row)
+                          has_row=left.has_row, kinds={**right.kinds, **left.kinds})
 
 
 # ----------------------------------------------------------------------------- expressions
@@ -669,9 +733,8 @@ class Expr:
     def text(s, k):
         return s if k == "text" else f"CAST({s} AS VARCHAR)"
 
-    @staticmethod
-    def date(s, k):
-        return s if k == "date" else f"sp_ts(CAST({s} AS VARCHAR))"
+    def date(self, s, k):
+        return s if k == "date" else f"sp_ts_{self.tr.order.lower()}(CAST({s} AS VARCHAR))"
 
     @staticmethod
     def boolean(s, k):
@@ -702,10 +765,8 @@ class Expr:
             base = n["of"]
             if base is not None and not (base["t"] == "id" and (base["name"] == "_" or bind.get(base["name"]) == "*row*")):
                 raise Unsupported("nested field access is not supported")
-            if base is None and bind and "*row*" in bind.values():
-                pass
             self.tr._use(self.rel, [n["name"]], "expression", self.main)
-            return q(n["name"]), "unknown"
+            return q(n["name"]), self.rel.kinds.get(n["name"], "unknown")
         if t == "un":
             s, k = self.sql(n["e"], bind)
             if n["op"] == "not":
@@ -720,6 +781,11 @@ class Expr:
             kinds = {ak, bk} - {"unknown"}
             kind = kinds.pop() if len(kinds) == 1 else "unknown"
             return f"(CASE WHEN COALESCE({self.boolean(c, ck)}, FALSE) THEN {a} ELSE {b} END)", kind
+        if t == "is":
+            s, _ = self.sql(n["e"], bind)
+            if n["type"] != "null":
+                raise Unsupported(f"`is {n['type']}` type tests are not supported")
+            return f"({s} IS NULL)", "bool"
         if t == "try":
             raise Unsupported("try/otherwise is not supported")
         if t == "call":
@@ -790,9 +856,20 @@ class Expr:
             sep = T(1) if len(a) > 1 else "''"
             return f"concat_ws({sep}, {', '.join(self.text(*self.sql(i, bind)) for i in a[0]['items'])})", "text"
         if fn == "Number.From": argc(1, 2); return f"sp_dbl(CAST({S(0)[0]} AS VARCHAR))", "num"
-        if fn == "Number.Round": argc(1, 2, 3); return (f"round({N(0)}, {N(1)}::INTEGER)" if len(a) > 1 else f"round({N(0)})"), "num"
-        if fn == "Number.RoundUp": argc(1); return f"ceil({N(0)})", "num"
-        if fn == "Number.RoundDown": argc(1); return f"floor({N(0)})", "num"
+        if fn in ("Number.Round", "Number.RoundUp", "Number.RoundDown"):
+            argc(1, 2, 3)
+            digits = f"{N(1)}::INTEGER" if len(a) > 1 else "0"
+            mode = {"Number.RoundUp": "RoundingMode.Up", "Number.RoundDown": "RoundingMode.Down"}.get(fn, "RoundingMode.ToEven")
+            if len(a) > 2 and a[2]["t"] == "id":
+                mode = a[2]["name"]
+            x, p = N(0), f"power(10, {digits})"
+            # Power Query's default is round-half-to-even; DuckDB's round() rounds half away from zero.
+            exprs = {"RoundingMode.ToEven": f"round_even({x}, {digits})", "RoundingMode.AwayFromZero": f"round({x}, {digits})",
+                     "RoundingMode.Up": f"(ceil({x} * {p}) / {p})", "RoundingMode.Down": f"(floor({x} * {p}) / {p})",
+                     "RoundingMode.TowardZero": f"(trunc({x} * {p}) / {p})"}
+            if mode not in exprs:
+                raise Unsupported(f"{mode} is not supported")
+            return exprs[mode], "num"
         if fn == "Number.Abs": argc(1); return f"abs({N(0)})", "num"
         if fn == "Number.Mod": argc(2); return f"({N(0)} % {N(1)})", "num"
         if fn == "Number.IntegerDivide": argc(2); return f"({N(0)} // {N(1)})", "num"
@@ -850,10 +927,11 @@ def stage_value(v):
 
 def stage_table(cur, columns: list[str], rows: list[tuple]) -> None:
     """(Re)create TEMP table ``_stg`` with a ``__row`` column plus VARCHAR columns."""
+    from .bulk import bulk_insert
     ddl = ", ".join(f"{q(c)} VARCHAR" for c in columns)
     cur.execute(f'CREATE OR REPLACE TEMP TABLE "_stg" ("__row" INTEGER{", " + ddl if ddl else ""})')
     if rows:
-        cur.executemany(f'INSERT INTO "_stg" VALUES ({", ".join("?" for _ in range(len(columns) + 1))})', rows)
+        bulk_insert(cur, "_stg", ["__row", *columns], rows)
 
 
 def describe_final(cur, p: Pipeline) -> list[tuple[str, str]]:

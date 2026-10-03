@@ -57,7 +57,7 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
  <div id="mtransform"></div>
  <div id="mlayouts"></div>
  <div class="card"><h2>Append mapped rows to DuckDB</h2><p class="mute">Loads every stored sheet whose layout has a saved mapping and that hasn't been loaded yet (same content + sheet is never loaded twice unless forced).</p>
-  <button class="b p" id="mload">Load / append now</button> <label class="mute"><input type="checkbox" id="mforce"> force reload</label>
+  <button class="b p" id="mload">Load / append now</button> <label class="mute"><input type="checkbox" id="mforce"> force reload (replaces rows already loaded from those sheets)</label>
   <div class="prog" style="margin:.6rem 0"><i id="lbar" style="width:0"></i></div><div id="lmsg" class="mono mute"></div><div id="lres"></div>
   <h2 style="margin-top:1rem">Load log</h2><div id="loglist" class="scroll"></div></div>
 </section>
@@ -116,17 +116,24 @@ let DF=[];
 async function initMap(){DF=await api("/api/dataflows");const s=$("#mdf");const keep=s.value;s.replaceChildren(...DF.map(d=>h("option",{value:d.dataflow_id},`${d.name||"(unnamed)"} · ${d.dataflow_id}`)));if(keep)s.value=keep;fillEnt();loadLog()}
 function fillEnt(){const d=DF.find(x=>x.dataflow_id===$("#mdf").value);$("#ment").replaceChildren(...(d?d.entities:[]).map(e=>h("option",{value:e.name},e.name)));loadMap()}
 $("#mdf").onchange=fillEnt;$("#ment").onchange=loadMap;
+function dateOrderControl(tr,dfid,ent,after){const sel=h("select",{},h("option",{value:"auto"},"auto (from dataflow culture)"),h("option",{value:"DMY"},"day first (31/12/2024)"),h("option",{value:"MDY"},"month first (12/31/2024)"));
+ sel.value=tr.date_order_setting||"auto";const msg=h("span",{class:"mute"});
+ const box=h("div",{style:"margin:.5rem 0"},"Text dates are read ",sel," ",h("span",{class:"mute"},`→ currently ${tr.date_order==="MDY"?"month first":"day first"}`+(tr.culture?` (dataflow culture ${tr.culture})`:" (dataflow has no culture)")),msg);
+ return{box,sel,save:async()=>{}}}
 async function loadTransform(){const box=$("#mtransform");box.replaceChildren();
  const dfid=$("#mdf").value,ent=$("#ment").value;if(!dfid||!ent)return;
  let tr;try{tr=await api(`/api/transform?dataflow_id=${dfid}&entity=${encodeURIComponent(ent)}`)}catch(e){box.append(h("div",{class:"card bad"},e.message));return}
- if(!tr.has_m){box.append(h("div",{class:"card mute"},"No Power Query code stored for this entity, so columns are mapped straight to attributes."));return}
+ if(!tr.has_m){const d=dateOrderControl(tr,dfid,ent);const m=h("span",{class:"mute"});
+  d.sel.onchange=async()=>{try{await api("/api/transform/save",{dataflow_id:dfid,entity:ent,use_m:false,accept_partial:false,override_sql:"",extra_inputs:[],date_order:d.sel.value});m.textContent=" saved";m.className="ok";loadMap()}catch(e){m.textContent=" "+e.message;m.className="bad"}};
+  box.append(h("div",{class:"card"},h("div",{class:"mute"},"No Power Query code stored for this entity, so columns are mapped straight to attributes."),d.box,m));return}
  const tables=(await api("/api/schema")).filter(x=>x.kind==="table").map(x=>x.name);
  const useBox=h("input",{type:"checkbox"}),partBox=h("input",{type:"checkbox"});useBox.checked=tr.use_m;partBox.checked=tr.accept_partial;
  const ov=h("textarea",{rows:8,class:"mono",placeholder:"Optional: your own SELECT reading staged table _stg (columns = the input columns below, plus __row). Overrides the generated SQL."});ov.value=tr.override_sql;
  const extra=h("input",{type:"text",placeholder:"extra input columns for your SQL, comma separated"});extra.value=(tr.extra_inputs||[]).join(", ");
  const msg=h("span",{class:"mute"}),prev=h("div",{style:"margin-top:.6rem"});
  const laySel=h("select",{},...(await api("/api/layouts")).map(l=>h("option",{value:l.layout_hash},`${l.layout_hash} · ${l.example}`)));
- const save=async()=>{try{await api("/api/transform/save",{dataflow_id:dfid,entity:ent,use_m:useBox.checked,accept_partial:partBox.checked,override_sql:ov.value,extra_inputs:extra.value.split(",")});msg.textContent="Saved";msg.className="ok";loadMap()}catch(e){msg.textContent=e.message;msg.className="bad"}};
+ const dord=dateOrderControl(tr,dfid,ent);
+ const save=async()=>{try{await api("/api/transform/save",{dataflow_id:dfid,entity:ent,use_m:useBox.checked,accept_partial:partBox.checked,override_sql:ov.value,extra_inputs:extra.value.split(","),date_order:dord.sel.value});msg.textContent="Saved";msg.className="ok";loadMap()}catch(e){msg.textContent=e.message;msg.className="bad"}};
  const preview=async step=>{prev.replaceChildren(h("span",{class:"mute"},"Running on a sample of the first stored file with that layout…"));
   try{const r=await api("/api/transform/preview",{dataflow_id:dfid,entity:ent,layout_hash:laySel.value,step,limit:50});
    prev.replaceChildren(h("div",{class:"mute"},`${step?"Output of step "+step:"Final output"} · ${r.staged_rows} sample row(s) staged · ${r.rows.length} shown`),h("div",{class:"scroll"},table(r.columns,r.rows)))}
@@ -141,7 +148,7 @@ async function loadTransform(){const box=$("#mtransform");box.replaceChildren();
  box.append(h("div",{class:"card"},h("h2",{},"Power Query transformation · ",h("span",{class:statusCls},tr.status)),
   h("div",{class:"mute"},tr.translated?"All steps were translated to SQL.":"Some steps are not supported: edit the SQL below or accept a partial translation (skipped steps are NOT applied)."),
   tr.error?h("div",{class:"bad"},tr.error):"",
-  h("div",{style:"margin:.5rem 0"},h("label",{},useBox," use Power Query steps when loading "),h("label",{style:"margin-left:1rem"},partBox," accept partial translation")),
+  h("div",{style:"margin:.5rem 0"},h("label",{},useBox," use Power Query steps when loading "),h("label",{style:"margin-left:1rem"},partBox," accept partial translation")),dord.box,
   h("details",{open:tr.translated?null:true},h("summary",{},`Steps (${tr.steps.length})`),h("div",{class:"scroll"},table(["#","Query","Step","Function","Status",""],stepRows))),
   Object.keys(tr.references).length?h("div",{style:"margin-top:.6rem"},h("b",{},"Lookups / referenced queries"),...refs):"",
   h("div",{style:"margin:.5rem 0"},"Import a lookup file as a table: ",refPath," ",h("button",{class:"b",on:{click:async()=>{try{const r=await api("/api/reference/import",{path:refPath.value});refMsg.textContent=`Created table ${r.table} (${r.rows} rows). Bind a lookup to it above.`;refMsg.className="ok";loadMap()}catch(e){refMsg.textContent=e.message;refMsg.className="bad"}}}},"Import")," ",refMsg),
@@ -164,7 +171,7 @@ async function loadMap(){loadTransform();const box=$("#mlayouts");box.replaceChi
   box.append(h("details",{class:"card",open:(lay.pending||!Object.keys(lay.saved).length)||null},h("summary",{},h("b",{},lay.layout_hash)," · ",lay.files," file(s) · ",lay.norm_headers.length," columns · ",unm?h("span",{class:"warn"},unm+" target(s) unmapped · "):"",lay.pending?h("span",{class:"warn"},"has unloaded data"):"",Object.keys(lay.saved).length?h("span",{class:"ok"}," · mapped"):h("span",{class:"mute"}," · not mapped yet")),
    h("div",{class:"scroll",style:"margin:.5rem 0"},table(["#","Source column","Status",m.mode==="m"?"→ Power Query input column":"→ Target attribute"],rows)),save," ",msg,h("div",{class:"mute"},"Example: "+lay.example)))}}
 $("#mload").onclick=async()=>{$("#lres").replaceChildren();try{const{job}=await api("/api/load/start",{dataflow_id:$("#mdf").value,entity:$("#ment").value,force:$("#mforce").checked});
- const j=await pollJob(job,"#lbar","#lmsg");$("#lres").replaceChildren(j.status==="done"?h("div",{class:j.result.sheets_failed?"warn":"ok"},`Loaded ${fmt(j.result.rows)} rows from ${j.result.sheets_loaded} sheet(s) into ${j.result.table}; ${j.result.sheets_failed} failed; ${fmt(j.result.coerce_error_cells)} cells couldn't be converted (NULL, see _coerce_errors). Nothing pending? Save a mapping first.`):h("div",{class:"bad"},j.error));loadLog();loadMap()}catch(e){$("#lres").replaceChildren(h("div",{class:"bad"},e.message))}};
+ const j=await pollJob(job,"#lbar","#lmsg");$("#lres").replaceChildren(j.status==="done"?h("div",{class:j.result.sheets_failed?"warn":"ok"},`Loaded ${fmt(j.result.rows)} rows from ${j.result.sheets_loaded} sheet(s) into ${j.result.table}`+(j.result.replaced_rows?` (replaced ${fmt(j.result.replaced_rows)} earlier rows)`:"")+`; ${j.result.sheets_failed} failed; ${fmt(j.result.coerce_error_cells)} cells couldn't be converted (NULL, see _coerce_errors).`+(j.result.ambiguous_dates?` ${fmt(j.result.ambiguous_dates)} text dates could be read day-first or month-first; they were read ${j.result.date_order==="MDY"?"month":"day"}-first.`:"")+(j.result.sheets_planned?"":" Nothing pending: save a mapping first, or tick force reload.")):h("div",{class:"bad"},j.error));loadLog();loadMap()}catch(e){$("#lres").replaceChildren(h("div",{class:"bad"},e.message))}};
 async function loadLog(){const l=await api("/api/loads");$("#loglist").replaceChildren(l.length?table(["When","Entity","File","Sheet","Rows","Empty","Bad cells","Status"],l.map(x=>[x.finished?.slice(0,19),x.entity,x.source_path,x.sheet,fmt(x.rows_loaded),fmt(x.rows_skipped_empty),fmt(x.coerce_error_cells),x.error?x.status+": "+x.error:x.status])):h("div",{class:"mute",style:"padding:.5rem"},"No loads yet."))}
 // ---------- sql + profile
 let last=null;

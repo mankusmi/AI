@@ -201,7 +201,8 @@ class App:
                 "use_m": plan["use_m"], "explicit": bool(plan["settings"]), "override_sql": st.get("override_sql", ""),
                 "accept_partial": st.get("accept_partial", False), "extra_inputs": st.get("extra_inputs", []),
                 "has_m": bool(p.steps) or bool(p.error), "bindings": tf.bindings(cur, dataflow_id),
-                "outputs": [], "missing_attributes": [], "sql_error": ""}
+                "date_order": plan["date_order"], "culture": plan["culture"], "date_order_source": plan["date_order_source"],
+                "date_order_setting": st.get("date_order", "auto"), "outputs": [], "missing_attributes": [], "sql_error": ""}
         if plan["sql"]:
             try:
                 cols = tf.output_columns(cur, plan)
@@ -369,7 +370,8 @@ def make_handler(app: App, port: int):
                     if len(stmts) != 1 or stmts[0].type != q.duckdb.StatementType.SELECT:
                         raise ValueError("The SQL override must be a single SELECT/WITH statement reading the staged table `_stg` (or CTE `src`)")
                 tf.save_settings(cur, b["dataflow_id"], b["entity"], bool(b.get("use_m")), sql,
-                                 bool(b.get("accept_partial")), [x.strip() for x in b.get("extra_inputs", []) if x.strip()])
+                                 bool(b.get("accept_partial")), [x.strip() for x in b.get("extra_inputs", []) if x.strip()],
+                                 b.get("date_order", "auto"))
                 return app.transform(b["dataflow_id"], b["entity"])
             if path == "/api/transform/preview":
                 return app.transform_preview(b)

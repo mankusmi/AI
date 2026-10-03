@@ -60,8 +60,12 @@ CREATE OR REPLACE VIEW v_duplicates AS
 TS = {"created", "modified"}
 
 
-def _insert(con, table: str, rows: list[dict], cols: list[str]) -> None:
+def _insert(con, table: str, rows: list[dict], cols: list[str], bulk: bool = True) -> None:
     if not rows:
+        return
+    if bulk:
+        from .bulk import bulk_insert
+        bulk_insert(con, table, cols, [[r.get(c) for c in cols] for r in rows])
         return
     ph = ", ".join("?::TIMESTAMPTZ" if c in TS else "?" for c in cols)
     con.executemany(f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({ph})",
@@ -129,7 +133,8 @@ def save_run(con, result: dict, source_type: str, root: str,
                     [run_id, __version__, source_type, root, site_url, library, folder,
                      json.dumps(params or {}), json.dumps(result["summary"], default=str)])
         files = [{**f, "run_id": run_id, "path_segments": f["rel_path"].split("/")} for f in result["files"]]
-        _insert(con, "files", files, [c for c in table_columns(con, "files")])
+        _insert(con, "files", files, [c for c in table_columns(con, "files") if c != "path_segments"])
+        con.execute("UPDATE files SET path_segments = string_split(rel_path, '/') WHERE run_id = ?", [run_id])
         sheets = [{**s, "run_id": run_id} for s in result["sheets"]]
         _insert(con, "sheets", sheets, table_columns(con, "sheets"))
         hdr = [{"run_id": run_id, "rel_path": s["rel_path"], "sheet": s["sheet"], "layout": s.get("layout"),
@@ -146,7 +151,7 @@ def save_run(con, result: dict, source_type: str, root: str,
                         "headers": l.headers, "norm_headers": l.norm_headers,
                         "added_vs_family_seed": d["added"], "removed_vs_family_seed": d["removed"],
                         "reordered_vs_family_seed": d["reordered"], "examples": l.examples})
-        _insert(con, "layouts", lay, table_columns(con, "layouts"))
+        _insert(con, "layouts", lay, table_columns(con, "layouts"), bulk=False)     # list-valued columns, few rows
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
