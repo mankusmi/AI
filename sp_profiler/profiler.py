@@ -11,6 +11,10 @@ from .layouts import Layout, build_layouts, diff_to_seed, header_frequency
 from .stats import counts, describe, group_describe
 
 
+META_KEYS = ("site_url", "library", "drive_id", "item_id", "sp_path", "mime_type", "created_by",
+             "modified_by_email", "etag", "ctag", "quickxor_hash", "sha1_hash")
+
+
 def profile(source, extensions: Optional[Iterable[str]] = None, scan_rows: int = 50,
             min_headers: int = 3, include_all_files: bool = True,
             progress: Optional[Callable[[int, str], None]] = None) -> dict:
@@ -32,6 +36,7 @@ def profile(source, extensions: Optional[Iterable[str]] = None, scan_rows: int =
             "status": "not_inspected", "error": "", "sha256": "", "sheet_count": None,
             "data_sheet_count": None, "total_data_rows": None, "primary_sheet": "",
             "primary_layout_hash": "", "layout_hashes": "", "has_macros": None,
+            **{k: entry.meta.get(k) for k in META_KEYS},
         }
         if is_target:
             if progress:

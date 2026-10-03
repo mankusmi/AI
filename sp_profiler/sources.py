@@ -9,6 +9,7 @@ import contextlib
 import os
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,7 @@ class FileEntry:
     created: Optional[str] = None
     modified_by: Optional[str] = None
     location: str = ""                # absolute path or SharePoint web URL
+    meta: dict = field(default_factory=dict)   # source-specific SharePoint metadata
     _materialize: Callable[[], contextlib.AbstractContextManager] = field(default=None, repr=False)
 
     @property
@@ -81,60 +83,78 @@ class LocalSource:
 
 # --------------------------------------------------------------------------- graph
 GRAPH = "https://graph.microsoft.com/v1.0"
+SCOPES = ["Files.Read.All", "Sites.Read.All"]
+# Microsoft's own public client ("Microsoft Graph Command Line Tools"): lets you sign in through the
+# browser without registering an app. Your tenant may require admin consent or block it; pass
+# --client-id for your own public-client app registration (redirect URI http://localhost) if so.
+DEFAULT_CLIENT_ID = "14d82eec-204b-4c2c-b7e8-06de6ef8d2e6"
+CACHE_PATH = Path.home() / ".sp_profiler" / "token_cache.json"
+
+
+class BrowserAuth:
+    """Delegated sign-in through the system browser, with a persistent token cache (silent refresh)."""
+
+    def __init__(self, tenant_id: str = "organizations", client_id: str = DEFAULT_CLIENT_ID,
+                 cache_path: Path = CACHE_PATH):
+        import msal
+        self.cache_path = Path(cache_path)
+        self.cache = msal.SerializableTokenCache()
+        if self.cache_path.exists():
+            self.cache.deserialize(self.cache_path.read_text())
+        self.app = msal.PublicClientApplication(
+            client_id, authority=f"https://login.microsoftonline.com/{tenant_id or 'organizations'}",
+            token_cache=self.cache)
+
+    def token(self) -> str:
+        res = None
+        accounts = self.app.get_accounts()
+        if accounts:
+            res = self.app.acquire_token_silent(SCOPES, account=accounts[0])
+        if not res:
+            res = self.app.acquire_token_interactive(SCOPES)   # opens the browser
+        if "access_token" not in res:
+            raise RuntimeError(f"Sign-in failed: {res.get('error_description', res)}")
+        if self.cache.has_state_changed:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self.cache_path.write_text(self.cache.serialize())
+            try:
+                self.cache_path.chmod(0o600)
+            except OSError:
+                pass
+        return res["access_token"]
 
 
 class GraphSource:
-    """List and download files from a SharePoint document library via Microsoft Graph.
-
-    Needs ``requests`` and ``msal``. App registration needs Graph permission
-    ``Sites.Read.All`` (application, with ``client_secret``) or ``Files.Read.All``
-    (delegated, interactive device-code login when no secret is given).
-    """
+    """List and download files from a SharePoint document library via Microsoft Graph."""
 
     def __init__(self, site_url: str, folder: str = "", library: str = "Documents",
-                 tenant_id: str = "", client_id: str = "", client_secret: str = "",
-                 token: str = "", session=None):
+                 auth=None, session=None):
         import requests  # local import: core package stays dependency-free
         self.site_url, self.folder, self.library = site_url, folder.strip("/"), library
+        self.auth = auth or BrowserAuth()
         self.session = session or requests.Session()
-        self._token = token or self._acquire_token(tenant_id, client_id, client_secret)
-        self.session.headers["Authorization"] = f"Bearer {self._token}"
         self.drive_id = self._resolve_drive()
-
-    # auth ------------------------------------------------------------------
-    @staticmethod
-    def _acquire_token(tenant_id: str, client_id: str, client_secret: str) -> str:
-        if not (tenant_id and client_id):
-            raise ValueError("Provide --token, or --tenant-id and --client-id")
-        import msal
-        authority = f"https://login.microsoftonline.com/{tenant_id}"
-        if client_secret:
-            app = msal.ConfidentialClientApplication(client_id, client_secret, authority=authority)
-            res = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-        else:
-            app = msal.PublicClientApplication(client_id, authority=authority)
-            flow = app.initiate_device_flow(scopes=["Files.Read.All", "Sites.Read.All"])
-            print(flow["message"], flush=True)
-            res = app.acquire_token_by_device_flow(flow)
-        if "access_token" not in res:
-            raise RuntimeError(f"Token acquisition failed: {res.get('error_description', res)}")
-        return res["access_token"]
 
     # graph helpers ---------------------------------------------------------
     def _get(self, url: str) -> dict:
-        r = self.session.get(url, timeout=60)
+        for attempt in range(5):
+            r = self.session.get(url, headers={"Authorization": f"Bearer {self.auth.token()}"}, timeout=60)
+            if r.status_code in (429, 503):               # throttled: honour Retry-After
+                time.sleep(int(r.headers.get("Retry-After", 2 ** attempt)))
+                continue
+            r.raise_for_status()
+            return r.json()
         r.raise_for_status()
-        return r.json()
 
     def _resolve_drive(self) -> str:
         u = urlparse(self.site_url)
         site = self._get(f"{GRAPH}/sites/{u.netloc}:{u.path.rstrip('/')}")
+        self.site_id = site["id"]
         drives = self._get(f"{GRAPH}/sites/{site['id']}/drives")["value"]
-        names = [d["name"] for d in drives]
         for d in drives:
             if d["name"].lower() == self.library.lower():
                 return d["id"]
-        raise LookupError(f"Library {self.library!r} not found on site; available: {names}")
+        raise LookupError(f"Library {self.library!r} not found; available: {[d['name'] for d in drives]}")
 
     def _children_url(self, folder: str) -> str:
         if not folder:
@@ -158,10 +178,14 @@ class GraphSource:
             tmpdir = tempfile.mkdtemp(prefix="sp_profiler_")
             path = Path(tmpdir) / item["name"]
             try:
-                url = item.get("@microsoft.graph.downloadUrl") or \
-                    f"{GRAPH}/drives/{self.drive_id}/items/{item['id']}/content"
-                with self.session.get(url, stream=True, timeout=300) as r:
+                url = item.get("@microsoft.graph.downloadUrl")
+                headers = {}
+                if not url:   # pre-authenticated URL must NOT get a bearer header; the /content one needs it
+                    url = f"{GRAPH}/drives/{self.drive_id}/items/{item['id']}/content"
+                    headers = {"Authorization": f"Bearer {self.auth.token()}"}
+                with self.session.get(url, headers=headers, stream=True, timeout=300) as r:
                     r.raise_for_status()
+                    r.raw.decode_content = True
                     with open(path, "wb") as fh:
                         shutil.copyfileobj(r.raw, fh)
                 yield path
@@ -172,13 +196,23 @@ class GraphSource:
     def iter_files(self) -> Iterator[FileEntry]:
         for folder, item in self._walk(self.folder):
             rel_folder = folder[len(self.folder):].strip("/") if self.folder else folder
+            by = lambda k: (item.get(k, {}).get("user", {}) or {})
+            hashes = item.get("file", {}).get("hashes", {}) or {}
             yield FileEntry(
                 rel_path=f"{rel_folder}/{item['name']}".strip("/"),
                 name=item["name"],
                 size_bytes=int(item.get("size", 0)),
                 modified=item.get("lastModifiedDateTime"),
                 created=item.get("createdDateTime"),
-                modified_by=(item.get("lastModifiedBy", {}).get("user", {}) or {}).get("displayName"),
+                modified_by=by("lastModifiedBy").get("displayName"),
                 location=item.get("webUrl", ""),
+                meta={
+                    "site_url": self.site_url, "library": self.library, "drive_id": self.drive_id,
+                    "item_id": item.get("id"), "sp_path": folder, "mime_type": item.get("file", {}).get("mimeType"),
+                    "created_by": by("createdBy").get("displayName"),
+                    "modified_by_email": by("lastModifiedBy").get("email"),
+                    "etag": item.get("eTag"), "ctag": item.get("cTag"),
+                    "quickxor_hash": hashes.get("quickXorHash"), "sha1_hash": hashes.get("sha1Hash"),
+                },
                 _materialize=self._download(item),
             )

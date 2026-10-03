@@ -92,8 +92,26 @@ def test_excel_only_filter(tree):
 
 def test_cli_writes_outputs(tree, tmp_path):
     out = tmp_path / "out"
-    assert main(["local", "--path", str(tree), "--out", str(out)]) == 0
+    assert main(["local", "--path", str(tree), "--out", str(out), "--db", str(out / "t.duckdb")]) == 0
     for name in ["file_inventory.csv", "sheet_headers.csv", "layouts.csv",
                  "header_frequency.csv", "summary.json", "report.html"]:
         assert (out / name).exists()
     assert json.loads((out / "summary.json").read_text())["distinct_layouts"] == 4
+
+
+def test_duckdb_store(tree, tmp_path_factory):
+    import duckdb
+    db = tmp_path_factory.mktemp("db") / "p.duckdb"
+    for _ in range(2):   # two runs -> history kept, views see only the latest
+        assert main(["local", "--path", str(tree), "--db", str(db)]) == 0
+    con = duckdb.connect(str(db), read_only=True)
+    assert con.execute("select count(*) from runs").fetchone()[0] == 2
+    assert con.execute("select count(*) from files").fetchone()[0] == 20
+    assert con.execute("select count(*) from v_files").fetchone()[0] == 10
+    assert con.execute("select count(*) from v_layouts").fetchone()[0] == 4
+    assert con.execute("select count(*) from v_duplicates").fetchone()[0] == 1
+    row = con.execute("select path_segments, modified::varchar from v_files where name='feb.xlsx'").fetchone()
+    assert row[0] == ["A", "feb.xlsx"] and row[1] is not None
+    n = con.execute("select count(*) from sheet_headers where run_id=(select run_id from latest_run) "
+                    "and norm_header='policy no'").fetchone()[0]
+    assert n == 6   # jan, feb, mar, mar_copy, apr, may

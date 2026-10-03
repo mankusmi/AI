@@ -9,13 +9,28 @@ pip install -e ".[sharepoint]"
 # 1) Folder on disk (OneDrive-synced SharePoint library, or a downloaded copy)
 sp-profile local --path "C:/Users/me/Contoso/Claims - Bordereaux" --out out/
 
-# 2) Straight from SharePoint via Microsoft Graph (files are streamed to a temp dir and deleted)
+# 2) Straight from SharePoint: opens your browser to sign in (token cached in ~/.sp_profiler)
 sp-profile graph --site-url https://contoso.sharepoint.com/sites/Claims \
-  --library Documents --folder "Bordereaux/2024" \
-  --tenant-id <guid> --client-id <guid> [--client-secret <s>]   # no secret -> device-code login
+  --library Documents --folder "Bordereaux/2024" --db profile.duckdb
+sp-profile graph --site-url ... --logout     # forget the cached sign-in
 ```
 
-Outputs in `--out`: `file_inventory.csv`, `sheet_headers.csv`, `layouts.csv`,
+Files are streamed to a temp dir and deleted. The default client is Microsoft's public
+"Graph Command Line Tools" app; if your tenant blocks it, register a public-client app
+(redirect URI `http://localhost`, delegated `Files.Read.All` + `Sites.Read.All`) and pass `--client-id`.
+
+Results go to DuckDB (`--db`, default `sp_profile.duckdb`), appended per run (`run_id`):
+`runs`, `files` (paths, `path_segments`, sizes, created/modified, SharePoint item/drive ids, etags, hashes,
+status, layout), `sheets`, `sheet_headers` (one row per header cell), `layouts`; views `v_files`, `v_layouts`,
+`v_file_layouts`, `v_duplicates` show the latest run.
+
+```sql
+SELECT layout, family, files, columns FROM v_layouts ORDER BY files DESC;
+SELECT path_segments[1] AS top_folder, count(*), sum(size_bytes) FROM v_files GROUP BY 1;
+```
+
+Optional `--out DIR` also writes CSV/JSON/HTML exports:
+`file_inventory.csv`, `sheet_headers.csv`, `layouts.csv`,
 `header_frequency.csv`, `summary.json`, `report.html`.
 
 * **Header row** = first row (within `--scan-rows`, default 50) with the most unique text cells
