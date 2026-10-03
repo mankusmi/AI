@@ -118,3 +118,29 @@ sheet; the result is converted to the entity's attribute types and appended to `
 * Power Query semantics worth knowing: `Number.Round` defaults to round-half-to-even (as in Power Query); once a step types a
   column, later comparisons and arithmetic use that type (so `[a] = [b]` on `1.0` and `1` is true).
 * SharePoint calls retry on throttling (429/5xx, honouring `Retry-After`) and network errors, and refresh expired download links.
+
+## Loading into Databricks
+
+```bash
+sp-profile export-databricks --db profile.duckdb --out C:/exports --catalog main --schema bordereaux \
+  --volume-path /Volumes/main/bordereaux/landing/sp_profiler          # also: Query tab > "Export for Databricks"
+```
+creates `C:/exports/<export_id>/` with one folder of Parquet files per table, `manifest.json`, `databricks_load.py` (notebook) and
+`databricks_load.sql`. Then:
+
+1. Upload the `<export_id>` folder to a Unity Catalog **volume** (Catalog > volume > Upload, or `databricks fs cp -r <folder> dbfs:/Volumes/...`),
+   or to ADLS/S3 and use that path instead.
+2. Import `databricks_load.py` as a notebook, set the widgets (source path, catalog, schema) and run all.
+   It creates/updates Delta tables `df_<entity>` plus `files`, `sheets`, `sheet_headers`, `layouts`, `load_log`, `runs`,
+   `dataflow_attributes`, `column_mappings`. (`databricks_load.sql` does the same with `CREATE TABLE` + `COPY INTO` if you prefer SQL.)
+
+Details: column names are made Delta-safe (spaces/`,;{}()=` become `_`; `_load_id` etc. are kept), naive timestamps are exported as UTC
+instants (Spark `TIMESTAMP`), TIME/JSON become strings, decimals/arrays/booleans map directly, and file names never start with `_`
+(Spark ignores those). `--tables` picks tables, `--prefix` prefixes the Databricks table names, `--include-blobs` also exports the
+original Excel bytes (`file_blobs`, large).
+
+**Incremental:** `--incremental` exports only the entity-table sheets loaded since the previous export (tracked in `export_log`).
+The notebook then deletes those sheets from the target (matching `_source_sha256` + `_sheet`) and appends the new rows, so
+reloaded sheets replace rather than duplicate and re-running the notebook is safe. The mode is fixed per export (a full export
+overwrites, an incremental one merges). Metadata tables are always exported in full and overwritten. Rows you delete by hand in DuckDB are
+not propagated to Databricks; do a full export for that.

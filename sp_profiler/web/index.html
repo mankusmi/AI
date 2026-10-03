@@ -67,7 +67,13 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
   <div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
   <button class="b p" id="run">Run (Ctrl+Enter)</button><button class="b" id="prof">Profile result</button><button class="b" id="csv">Download CSV</button>
   <label class="mute"><input type="checkbox" id="allow"> allow changes (CREATE/INSERT/…)</label><span id="sqlmsg" class="mute"></span></div></div>
- <div class="card"><div id="result" class="scroll"></div></div><div class="card" id="profcard" style="display:none"><h2 id="proftitle">Profile</h2><div id="profile" class="scroll"></div></div></div></div>
+ <div class="card"><div id="result" class="scroll"></div></div><div class="card"><details><summary><b>Export for Databricks</b> (Parquet + load notebook)</summary>
+  <p class="mute">Writes a folder of Parquet files (one subfolder per table) with a generated notebook and SQL. Upload it to a Unity Catalog volume, then run the notebook. Tables: every loaded <span class="mono">df_*</span> entity table plus file/layout/load metadata.</p>
+  <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center"><input type="text" id="xout" placeholder="output folder on this computer, e.g. C:/exports" style="flex:2 1 260px"><input type="text" id="xvol" placeholder="/Volumes/main/bdx/landing/sp_profiler" style="flex:2 1 260px">
+  <input type="text" id="xcat" value="main" style="flex:0 1 90px"><input type="text" id="xsch" value="bordereaux" style="flex:0 1 120px"></div>
+  <div style="margin-top:.5rem;display:flex;gap:.8rem;flex-wrap:wrap;align-items:center"><label class="mute"><input type="checkbox" id="xinc"> incremental (only sheets loaded since last export)</label>
+  <label class="mute"><input type="checkbox" id="xblob"> include original Excel files</label><button class="b p" id="xgo">Export</button><span id="xmsg" class="mute"></span></div></details></div>
+ <div class="card" id="profcard" style="display:none"><h2 id="proftitle">Profile</h2><div id="profile" class="scroll"></div></div></div></div>
 </section>
 </main>
 <script>
@@ -191,6 +197,10 @@ $("#prof").onclick=async()=>{$("#profcard").style.display="block";$("#profile").
    h("div",{},fmt(c.nulls)+" ("+c.null_pct+"%)",h("div",{class:"bar n"},h("i",{style:`width:${c.null_pct}%`}))),fmt(c.distinct)+" ("+c.distinct_pct+"%)",c.min,c.max,c.mean!=null?fmt(c.mean):c.avg_len!=null?fmt(c.avg_len)+" chars":"",c.std!=null?fmt(c.std):"",c.median!=null?fmt(c.median):"",
    (c.top||[]).map(t=>h("div",{},h("span",{class:"mono"},t.value.length>40?t.value.slice(0,40)+"…":t.value)," ",h("span",{class:"mute"},fmt(t.count)+" · "+t.pct+"%")))])))}
  catch(e){$("#profile").replaceChildren(h("div",{class:"bad",style:"padding:.5rem"},e.message))}};
+$("#xgo").onclick=async()=>{$("#xmsg").textContent="exporting…";$("#xmsg").className="mute";
+ try{const r=await api("/api/export/databricks",{out:$("#xout").value,volume_path:$("#xvol").value,catalog:$("#xcat").value,schema:$("#xsch").value,incremental:$("#xinc").checked,include_blobs:$("#xblob").checked});
+  $("#xmsg").textContent=`Done → ${r.path} · ${r.tables.map(x=>x.name+" ("+fmt(x.rows)+")").join(", ")}`+(r.skipped.length?` · skipped: ${r.skipped.map(s=>s.table+" ("+s.reason+")").join(", ")}`:"");$("#xmsg").className="ok"}
+ catch(e){$("#xmsg").textContent=e.message;$("#xmsg").className="bad"}};
 // ---------- boot
 (async()=>{const s=await refreshState();await fb.go(s.home);loadLayouts()})();
 </script></body></html>

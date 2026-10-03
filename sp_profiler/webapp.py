@@ -382,6 +382,15 @@ def make_handler(app: App, port: int):
                         raise LookupError(f"Table {b['table_name']!r} does not exist")
                     cur.execute("INSERT INTO query_bindings VALUES (?, ?, ?)", [b["dataflow_id"], b["query_name"], b["table_name"]])
                 return {"ok": True}
+            if path == "/api/export/databricks":
+                from .export import export_databricks
+                if not b.get("out"):
+                    raise ValueError("Choose an output folder")
+                m = export_databricks(app.con.cursor(), b["out"], b.get("tables") or None, bool(b.get("incremental")),
+                                      bool(b.get("include_blobs")), b.get("prefix", ""), b.get("catalog", "main"),
+                                      b.get("schema", "bordereaux"), b.get("volume_path") or "/Volumes/<catalog>/<schema>/<volume>/sp_profiler")
+                return {k: m[k] for k in ("export_id", "mode", "path", "skipped")} | {
+                    "tables": [{"name": x["name"], "kind": x["kind"], "rows": x["rows"], "files": len(x["files"])} for x in m["tables"]]}
             if path == "/api/reference/import":
                 return tf.import_reference(cur, b["path"], b.get("table_name", ""), b.get("sheet", ""))
             if path == "/api/sql":

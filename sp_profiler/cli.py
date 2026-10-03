@@ -51,6 +51,18 @@ def main(argv=None) -> int:
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--no-browser", action="store_true", help="do not open the browser automatically")
 
+    db = sub.add_parser("export-databricks", help="write Parquet + a Databricks load notebook/SQL")
+    db.add_argument("--db", default="sp_profile.duckdb")
+    db.add_argument("--out", default="databricks_export", help="folder to create the export in")
+    db.add_argument("--tables", nargs="*", help="tables to export (default: all df_* tables + file/layout/load metadata)")
+    db.add_argument("--incremental", action="store_true", help="df_* tables: only sheets loaded since the last export")
+    db.add_argument("--include-blobs", action="store_true", help="also export the original Excel bytes (file_blobs)")
+    db.add_argument("--prefix", default="", help="prefix for the Databricks table names")
+    db.add_argument("--catalog", default="main")
+    db.add_argument("--schema", default="bordereaux")
+    db.add_argument("--volume-path", default="/Volumes/<catalog>/<schema>/<volume>/sp_profiler",
+                    help="where you will upload the export (baked into the generated notebook/SQL)")
+
     ex = sub.add_parser("export", help="write a stored file's bytes back out of DuckDB")
     ex.add_argument("--db", default="sp_profile.duckdb")
     ex.add_argument("--rel-path", required=True)
@@ -60,6 +72,18 @@ def main(argv=None) -> int:
     if a.source == "serve":
         from .webapp import serve
         serve(a.db, a.port, not a.no_browser)
+        return 0
+    if a.source == "export-databricks":
+        from .export import export_databricks
+        con = open_db(a.db)
+        m = export_databricks(con, a.out, a.tables, a.incremental, a.include_blobs, a.prefix, a.catalog, a.schema, a.volume_path)
+        con.close()
+        print(f"Export {m['export_id']} ({m['mode']}) -> {m['path']}")
+        for tb in m["tables"]:
+            print(f"  {tb['name']:28s} {tb['rows']:>10,} rows  {len(tb['files'])} file(s)")
+        for s in m["skipped"]:
+            print(f"  skipped {s['table']}: {s['reason']}")
+        print("Upload that folder to Databricks, then import databricks_load.py as a notebook (or run databricks_load.sql).")
         return 0
     if a.source == "export":
         con = open_db(a.db)

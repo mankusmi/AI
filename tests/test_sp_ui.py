@@ -153,7 +153,7 @@ def call(port, token, path, body=None, host=None):
         return e.code, json.loads(e.read() or b"{}") if e.headers.get("Content-Type", "").startswith("application/json") else {}
 
 
-def test_server_auth_and_flow(server):
+def test_server_auth_and_flow(server, tmp_path):
     app, port, src = server
     assert call(port, "wrong", "/api/state")[0] == 401
     assert call(port, app.token, "/api/state", host="evil.com")[0] == 403
@@ -193,3 +193,7 @@ def test_server_auth_and_flow(server):
             break
         time.sleep(0.1)
     assert job["status"] == "done", job
+    s, x = call(port, app.token, "/api/export/databricks", {"out": str(tmp_path / "dbx"), "volume_path": "/Volumes/c/s/v/x", "prefix": "bdx_"})
+    assert s == 200 and {t["name"]: t["rows"] for t in x["tables"]}["df_policies"] == 3
+    assert (Path(x["path"]) / "databricks_load.py").exists()
+    assert call(port, app.token, "/api/export/databricks", {"out": ""})[0] == 400
