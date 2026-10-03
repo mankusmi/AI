@@ -23,7 +23,7 @@ def _base_row(entry, is_target: bool) -> dict:
         "status": "not_inspected", "error": "", "sha256": "", "sheet_count": None,
         "data_sheet_count": None, "total_data_rows": None, "primary_sheet": "",
         "primary_layout_hash": "", "layout_hashes": "", "has_macros": None, "content_stored": False,
-        "warnings": "", "reused_from": None,
+        "warnings": "", "reused_from": None, "coverholder": "",
         **{k: entry.meta.get(k) for k in META_KEYS},
     }
 
@@ -65,6 +65,7 @@ def profile(source, extensions: Optional[Iterable[str]] = None, scan_rows: int =
             blob_sink: Optional[Callable[[object, str], bool]] = None, *,
             workers: int = 1, include_hidden: bool = False, exact_rows: bool = False,
             previous: Optional[Callable[[object], Optional[tuple]]] = None,
+            coverholder_of: Optional[Callable[[object], str]] = None,
             on_file: Optional[Callable[[dict, list], None]] = None) -> dict:
     """Profile every file a source yields.
 
@@ -84,6 +85,7 @@ def profile(source, extensions: Optional[Iterable[str]] = None, scan_rows: int =
         if not is_target and not include_all_files:
             continue
         row = _base_row(entry, is_target)
+        row["coverholder"] = (coverholder_of(entry) if coverholder_of else "") or ""
         reuse = previous(entry) if (is_target and previous) else None
         jobs.append((entry, row, is_target, reuse))
 
@@ -95,7 +97,8 @@ def profile(source, extensions: Optional[Iterable[str]] = None, scan_rows: int =
             merged.update(rel_path=entry.rel_path, name=entry.name, folder=entry.folder, depth=entry.depth,
                           extension=entry.extension, location=entry.location, size_bytes=entry.size_bytes,
                           modified=entry.modified, created=entry.created, modified_by=entry.modified_by,
-                          inspected=True, **{k: entry.meta.get(k) for k in META_KEYS})     # ... current identity
+                          inspected=True, coverholder=row["coverholder"],
+                          **{k: entry.meta.get(k) for k in META_KEYS})     # ... current identity
             return merged, [{**s, "rel_path": entry.rel_path} for s in prev_sheets], True
         if not is_target:
             return row, [], False

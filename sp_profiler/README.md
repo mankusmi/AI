@@ -188,3 +188,43 @@ attributes, comments and `;`/`shared` inside strings.
 
 `pip install -e ".[dev]"`, then `ruff check sp_profiler ...` and `pytest` (the browser test runs when Playwright and Chromium are
 installed: `playwright install chromium`, or set `SP_CHROMIUM`). CI runs both on Linux and Windows (`.github/workflows/tests.yml`).
+
+## Pipelines: coverholder files → dataflow 1 → dataflow 2 → merge
+
+For the multi-stage flow (a folder per coverholder, normalise with one dataflow, enrich with a second that uses a mapping workbook,
+then merge everything with a final dataflow) use the **5 · Pipeline** tab, or `sp-profile pipeline-run --db profile.duckdb --name "Bordereaux"`.
+
+**Set it up once**
+
+1. **Profile each coverholder's folder** (Sources tab). "This folder is one coverholder" labels every file with the folder name
+   (or choose "each subfolder is one" for a parent folder, or type a name). Keep file bytes on. Profile the folder holding the mapping workbook with
+   "none" so it is not treated as a coverholder.
+2. **Import the three dataflow JSON files** (Dataflow tab).
+3. **Dataflow 1** (Map & load tab): map each layout's columns onto the inputs its steps read, as before. Layouts that are not bordereaux
+   (e.g. the mapping workbook if it sits in a coverholder folder) can be ticked "not a bordereau (ignore)".
+4. **Dataflow 2**: it reads dataflow 1's output, so there are no sheet columns to map. Its mapping workbook is a lookup query: import the
+   workbook you already profiled (Lookups → "Import a lookup workbook you already profiled", name the sheet) and **Bind** the lookup to the
+   table. Binding can be for all coverholders or one coverholder (per-coverholder mapping files). The table **refreshes automatically** when the
+   workbook changes and is re-profiled.
+5. **Pipeline tab**: stage 1 = files → dataflow 1, add a stage for dataflow 2 and a merge stage for the final dataflow, name the output tables, Save.
+
+**Run it** (button, or `pipeline-run`): for each coverholder, stage 1 then stage 2; when all are done, the merge stage runs once.
+
+* Stage 1 loads that coverholder's new/changed sheets into one table with a `_coverholder` column (a changed file replaces its old rows).
+* Stage 2 applies dataflow 2 to that coverholder's stage-1 rows; its source is the previous stage's table (columns are checked, and a
+  clear message lists missing ones). The coverholder's rows in the stage-2 table are replaced.
+* The merge stage applies the final dataflow to all coverholders' stage-2 rows and **replaces** the final table. Inside it, `_coverholder`
+  is available (e.g. rename it to `Coverholder`). A coverholder that is not ready blocks the merge unless you tick "merge even if some coverholders are not ready".
+* **Only affected work is redone.** A new file for one coverholder reruns that coverholder's stages and the merge; a changed mapping
+  workbook reruns stage 2 for everyone and the merge; nothing changed = everything "up to date". "Redo everything" forces it.
+* **Problems stay local.** A coverholder with an unmapped layout (status *needs mapping*, with the file named) or an error stops at that stage,
+  its later stages show *blocked*, and the other coverholders carry on. The status grid shows every coverholder × stage; click a cell for details.
+* A different dataflow can be used for one coverholder at any stage ("Different dataflow for one coverholder"); the stage's output table stays the same.
+* Per-coverholder views `<output table>__<coverholder>` are created so a lookup or merge query can be bound to one coverholder's rows.
+* Export for Databricks includes every pipeline output (entity tables incrementally, derived tables as full snapshots) plus the run history.
+
+**Things to know**
+
+* A dataflow that reads another dataflow (linked entity) gets that stage's table as its source. If one query reads several linked entities, all of
+  them receive the same input (the stage reports a warning); bind extra inputs as lookups to the `__<coverholder>` views instead.
+* Stage 1 mappings are stored per layout and per entity name; give the dataflow-1 entity a name that is not used by a stage-1 entity in another dataflow.

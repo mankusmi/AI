@@ -12,7 +12,9 @@ import sys
 
 import logging
 
-from .runner import run_profile
+from pathlib import Path
+
+from .runner import coverholder_resolver, run_profile
 from .report import write_outputs
 from .sources import DEFAULT_CLIENT_ID, BrowserAuth, GraphSource, LocalSource
 from .store import export_file, open_db
@@ -41,6 +43,9 @@ def main(argv=None) -> int:
         sp.add_argument("--include-hidden", action="store_true", help="also profile hidden sheets")
         sp.add_argument("--exact-rows", action="store_true", help="count data rows exactly (slower; default uses sheet dimensions)")
         sp.add_argument("--refresh", action="store_true", help="re-inspect every file instead of reusing unchanged ones")
+        sp.add_argument("--coverholder", default="", help="label every file with this coverholder name")
+        sp.add_argument("--coverholders-from", choices=["folder", "subfolders", "none"], default="folder",
+                        help="folder: the selected folder is one coverholder (default); subfolders: each first-level subfolder is one")
         sp.add_argument("--excel-only", action="store_true", help="omit non-Excel files from the inventory")
 
     lo = sub.add_parser("local", help="local folder or OneDrive-synced SharePoint library")
@@ -74,6 +79,16 @@ def main(argv=None) -> int:
     db.add_argument("--volume-path", default="/Volumes/<catalog>/<schema>/<volume>/sp_profiler",
                     help="where you will upload the export (baked into the generated notebook/SQL)")
 
+    pr = sub.add_parser("pipeline-run", help="run a saved pipeline (define it in the browser UI): files -> dataflows -> merge")
+    pr.add_argument("--db", default="sp_profile.duckdb")
+    pr.add_argument("--name", required=True, help="pipeline name")
+    pr.add_argument("--coverholder", nargs="*", help="only these coverholders (default: all with stored files)")
+    pr.add_argument("--force", action="store_true", help="redo everything, ignoring 'unchanged'")
+    pr.add_argument("--allow-partial-merge", action="store_true", help="run the merge even if some coverholders are not ready")
+
+    pl_ = sub.add_parser("pipeline-list", help="list saved pipelines and their latest status")
+    pl_.add_argument("--db", default="sp_profile.duckdb")
+
     ex = sub.add_parser("export", help="write a stored file's bytes back out of DuckDB")
     ex.add_argument("--db", default="sp_profile.duckdb")
     ex.add_argument("--rel-path", required=True)
@@ -84,6 +99,34 @@ def main(argv=None) -> int:
         from .webapp import serve
         serve(a.db, a.port, not a.no_browser)
         return 0
+    if a.source in ("pipeline-run", "pipeline-list"):
+        from . import pipeline as pl
+        con = open_db(a.db)
+        if a.source == "pipeline-list":
+            for p in pl.list_pipelines(con):
+                st = pl.status_matrix(con, p["pipeline_id"])["last_run"]
+                print(f"{p['name']}: {' -> '.join(s['name'] for s in p['stages'])}  | last run: "
+                      f"{(st['started'][:19] + ' ' + st['status']) if st else 'never'}")
+            con.close()
+            return 0
+        row = con.execute("SELECT pipeline_id FROM pipelines WHERE name = ?", [a.name]).fetchone()
+        if not row:
+            raise SystemExit(f"No pipeline named {a.name!r}. Saved pipelines: "
+                             f"{[p['name'] for p in pl.list_pipelines(con)]}")
+        rep = pl.run_pipeline(con, row[0], a.coverholder or None, a.force, a.allow_partial_merge,
+                              lambda n, total, msg: log.info("[%d/%d] %s", n, total, msg))
+        con.close()
+        print(f"\nPipeline {a.name!r}: {rep['status']}")
+        for ch, c in rep["coverholders"].items():
+            print(f"  {ch:20s} " + "  ".join(f"{s['stage']}={s['status']}" for s in c["steps"]))
+            for s in c["steps"]:
+                if s["status"] not in ("loaded", "up_to_date"):
+                    print(f"      {s['stage']}: {s.get('detail', '')}")
+        for s in rep["merge"]:
+            print(f"  {'(merge)':20s} {s['stage']}={s['status']}" + ("" if s["status"] in ("loaded", "up_to_date") else f"  {s.get('detail', '')}"))
+        if rep["refreshed_references"]:
+            print("  refreshed lookup tables: " + ", ".join(r["table"] for r in rep["refreshed_references"]))
+        return 0 if rep["status"] == "ok" else 2
     if a.source == "export-databricks":
         from .export import export_databricks
         con = open_db(a.db)
@@ -103,6 +146,7 @@ def main(argv=None) -> int:
         return 0
     if a.source == "local":
         src, root, extra = LocalSource(a.path), str(LocalSource(a.path).root), {}
+        root_name = Path(root).name
     else:
         if a.logout:
             BrowserAuth.forget()
@@ -111,13 +155,15 @@ def main(argv=None) -> int:
         src = GraphSource(a.site_url, a.folder, a.library, BrowserAuth(a.tenant_id, a.client_id))
         root, extra = f"{a.site_url}/{a.library}/{a.folder}".rstrip("/"), \
             {"site_url": a.site_url, "library": a.library, "folder": a.folder}
+        root_name = a.folder.strip("/").split("/")[-1] if a.folder.strip("/") else a.library
 
     con = open_db(a.db)
     out = run_profile(con, src, a.source, root, extra, ext=a.ext, scan_rows=a.scan_rows, min_headers=a.min_headers,
                       excel_only=a.excel_only, store_content=not a.no_content, max_content_mb=a.max_content_mb,
                       blob_dir=a.blob_dir or None, workers=a.workers or (4 if a.source == "graph" else 1),
                       include_hidden=a.include_hidden, exact_rows=a.exact_rows, refresh=a.refresh,
-                      progress=lambda n, path: log.info("[%d] %s", n, path))
+                      progress=lambda n, path: log.info("[%d] %s", n, path),
+                      coverholder_of=coverholder_resolver("name" if a.coverholder else a.coverholders_from, a.coverholder, root_name))
     con.close()
     res, run_id = out["result"], out["run_id"]
     paths = write_outputs(res, a.out) if a.out else {}

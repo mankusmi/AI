@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Callable, Optional
 
 from .profiler import profile
@@ -10,11 +11,27 @@ from .store import BlobSink, RunWriter, inspect_key, make_previous
 log = logging.getLogger("sp_profiler")
 
 
+def coverholder_resolver(mode: str, name: str = "", root_name: str = "") -> Optional[Callable]:
+    """How each file gets its coverholder label.
+
+    ``folder``: the selected folder is one coverholder (``root_name``; for loose files, each file's parent folder);
+    ``subfolders``: the first subfolder under the selected folder is the coverholder; ``name``: one explicit name.
+    """
+    if mode == "name":
+        return lambda e: name
+    if mode == "folder":
+        return lambda e: root_name or (Path(e.location).parent.name if e.location and not e.location.startswith("http") else "")
+    if mode == "subfolders":
+        return lambda e: e.rel_path.split("/")[0] if "/" in e.rel_path else root_name
+    return None
+
+
 def run_profile(con, source, source_type: str, root: str, extra: Optional[dict] = None, *,
                 ext: Optional[list[str]] = None, scan_rows: int = 50, min_headers: int = 3, excel_only: bool = False,
                 store_content: bool = True, max_content_mb: int = 200, blob_dir: Optional[str] = None,
                 workers: int = 1, include_hidden: bool = False, exact_rows: bool = False, refresh: bool = False,
-                progress: Optional[Callable[[int, str], None]] = None) -> dict:
+                progress: Optional[Callable[[int, str], None]] = None,
+                coverholder_of: Optional[Callable] = None) -> dict:
     """Profile ``source`` into ``con``.
 
     Progress is saved as the run goes (an interrupted run is not lost), unchanged files from earlier runs are reused
@@ -30,7 +47,8 @@ def run_profile(con, source, source_type: str, root: str, extra: Optional[dict] 
     previous = None if refresh else make_previous(con, key, want_content=store_content)
     try:
         res = profile(source, ext, scan_rows, min_headers, not excel_only, progress, sink, workers=workers,
-                      include_hidden=include_hidden, exact_rows=exact_rows, previous=previous, on_file=writer.add)
+                      include_hidden=include_hidden, exact_rows=exact_rows, previous=previous,
+                      coverholder_of=coverholder_of, on_file=writer.add)
         run_id = writer.finish(res)
     except BaseException as e:
         writer.fail(f"{type(e).__name__}: {e}")

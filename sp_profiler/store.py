@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS files (
     inspected BOOLEAN, status VARCHAR, error VARCHAR, sheet_count INTEGER, data_sheet_count INTEGER,
     total_data_rows BIGINT, primary_sheet VARCHAR, primary_layout VARCHAR, primary_family VARCHAR,
     layout_hashes VARCHAR, has_macros BOOLEAN, content_stored BOOLEAN,
-    primary_layout_hash VARCHAR, warnings VARCHAR, reused_from VARCHAR);
+    primary_layout_hash VARCHAR, warnings VARCHAR, reused_from VARCHAR, coverholder VARCHAR);
 
 -- Raw file bytes, stored once per distinct content (files.sha256 -> file_blobs.sha256).
 -- Either in the database (content) or on disk (path, when profiled with a blob directory).
@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS layouts (
 ADDED_COLUMNS = [("runs", "status", "VARCHAR DEFAULT 'complete'"), ("runs", "finished_utc", "TIMESTAMPTZ"),
                  ("files", "primary_layout_hash", "VARCHAR"), ("files", "warnings", "VARCHAR"),
                  ("files", "reused_from", "VARCHAR"), ("file_blobs", "path", "VARCHAR"),
-                 ("sheet_headers", "layout_hash", "VARCHAR"), ("load_log", "source_id", "VARCHAR")]
+                 ("sheet_headers", "layout_hash", "VARCHAR"), ("load_log", "source_id", "VARCHAR"),
+                 ("files", "coverholder", "VARCHAR"), ("load_log", "coverholder", "VARCHAR")]
 
 # "Latest state" views: one row per file identity (SharePoint item id, else absolute path), newest run wins, so
 # profiling a subset or another folder never hides files profiled earlier.
@@ -73,7 +74,8 @@ CREATE OR REPLACE VIEW v_layouts AS
     SELECT 'L' || lpad(CAST(row_number() OVER (ORDER BY count(DISTINCT f.sha256) DESC, s.layout_hash) AS VARCHAR), 2, '0') AS layout,
            s.layout_hash, count(DISTINCT f.sha256) AS files, count(*) AS sheets,
            any_value(len(h.norm_headers)) AS columns, any_value(f.rel_path) AS example,
-           any_value(h.headers) AS headers, any_value(h.norm_headers) AS norm_headers
+           any_value(h.headers) AS headers, any_value(h.norm_headers) AS norm_headers,
+           list(DISTINCT f.coverholder) FILTER (WHERE f.coverholder <> '') AS coverholders
     FROM v_sheets s JOIN v_files f USING (run_id, rel_path) JOIN h USING (run_id, rel_path, sheet)
     WHERE s.header_row IS NOT NULL AND f.sha256 <> '' GROUP BY s.layout_hash;
 CREATE OR REPLACE VIEW v_file_layouts AS
@@ -119,6 +121,8 @@ def open_db(db_path: str | Path):
     migrate(con)
     con.execute(DATAFLOW_DDL)
     con.execute(LOAD_DDL)
+    from .pipeline import PIPELINE_DDL
+    con.execute(PIPELINE_DDL)
     for table, col, typ in ADDED_COLUMNS:
         con.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
     con.execute("UPDATE sheet_headers SET layout_hash = s.layout_hash FROM sheets s WHERE sheet_headers.layout_hash IS NULL "

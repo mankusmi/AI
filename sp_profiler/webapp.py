@@ -21,9 +21,10 @@ from urllib.parse import parse_qs, urlparse
 
 from . import dataflow as df
 from . import mapping_load as ml
+from . import pipeline as pl
 from . import query as q
 from . import transforms as tf
-from .runner import run_profile
+from .runner import coverholder_resolver, run_profile
 from .sources import DEFAULT_CLIENT_ID, BrowserAuth, FileListSource, GraphSource, LocalSource
 from .store import open_db
 
@@ -129,16 +130,28 @@ class App:
             def prog(n, path):
                 job["done"], job["message"] = n, path
 
+            root_name = (Path(folder).name if folder else (sp.get("folder", "").strip("/").split("/")[-1] or sp.get("library", "Documents"))
+                         if sp else "")
+            mode = "name" if body.get("coverholder") else body.get("coverholder_mode", "folder")
             out = run_profile(cur, src, st, root, extra, excel_only=True, store_content=body.get("store_content", True),
                               max_content_mb=int(body.get("max_content_mb", 200)), blob_dir=body.get("blob_dir") or None,
                               workers=int(body.get("workers") or (4 if sp else 1)),
                               include_hidden=bool(body.get("include_hidden")), exact_rows=bool(body.get("exact_rows")),
-                              refresh=bool(body.get("refresh")), progress=prog)
+                              refresh=bool(body.get("refresh")), progress=prog,
+                              coverholder_of=coverholder_resolver(mode, body.get("coverholder", ""), root_name))
             res = out["result"]
             keys = ("total_files", "inspected_files", "status_counts", "distinct_layouts", "layout_families",
                     "duplicate_files", "reused_files", "files_with_warnings")
             return {"run_id": out["run_id"], "summary": {k: res["summary"].get(k) for k in keys}}
         return self.jobs.start("profile", work)
+
+    def start_pipeline_run(self, body: dict) -> str:
+        def work(job):
+            def prog(n, total, msg):
+                job["done"], job["total"], job["message"] = n, total, msg
+            return pl.run_pipeline(self.cur(), body["pipeline_id"], body.get("coverholders") or None, bool(body.get("force")),
+                                   bool(body.get("allow_partial_merge")), prog)
+        return self.jobs.start("pipeline", work)
 
     def start_load(self, body: dict) -> str:
         def work(job):
@@ -150,10 +163,10 @@ class App:
 
     # ---- data access --------------------------------------------------------
     def layouts(self) -> list[dict]:
-        rows = self.cur().execute("SELECT layout_hash, files, sheets, example, headers, norm_headers FROM v_layouts "
+        rows = self.cur().execute("SELECT layout_hash, files, sheets, example, headers, norm_headers, coverholders FROM v_layouts "
                                   "ORDER BY files DESC, layout_hash").fetchall()
-        return [{"layout_hash": h, "files": n, "sheets": s, "example": ex, "headers": hd, "norm_headers": nh}
-                for h, n, s, ex, hd, nh in rows]
+        return [{"layout_hash": h, "files": n, "sheets": s, "example": ex, "headers": hd, "norm_headers": nh,
+                 "coverholders": ch or []} for h, n, s, ex, hd, nh, ch in rows]
 
     def dataflows(self) -> list[dict]:
         cur = self.cur()
@@ -183,20 +196,46 @@ class App:
             return "input", [{"name": n, "type": "input column"} for n in plan["inputs"]], plan
         return "attribute", attrs, plan
 
+    def stage_use(self, cur, dataflow_id: str, entity: str):
+        """If this dataflow entity is a pipeline stage that reads another stage's output, describe that input."""
+        r = cur.execute("SELECT s.pipeline_id, p.name, s.position, s.name, s.input_stage FROM pipeline_stages s "
+                        "JOIN pipelines p USING (pipeline_id) WHERE s.dataflow_id = ? AND s.entity = ? AND s.kind <> 'files' LIMIT 1",
+                        [dataflow_id, entity]).fetchone()
+        if not r:
+            plan = tf.resolve(cur, dataflow_id, entity)
+            if plan["pipeline"].source_kinds == {"dataflow"}:       # reads a linked dataflow: no sheet columns to map
+                return {"pipeline": None, "stage": None, "upstream_stage": None, "upstream_table": None,
+                        "needs": plan["pipeline"].inputs, "available": [], "missing": []}
+            return None
+        pipe = pl.get_pipeline(cur, r[0])
+        up = pipe["stages"][r[4]]
+        plan = tf.resolve(cur, dataflow_id, entity)
+        have = [c[0] for c in cur.execute(f"SELECT column_name FROM (DESCRIBE \"{up['output_table']}\")").fetchall()] \
+            if cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [up["output_table"]]).fetchone() else []
+        need = plan["pipeline"].inputs
+        return {"pipeline": r[1], "stage": r[3], "upstream_stage": up["name"], "upstream_table": up["output_table"],
+                "needs": need, "available": [c for c in have if not c.startswith("_")],
+                "missing": [c for c in need if c.lower() not in {h.lower() for h in have}] if have else []}
+
     def mapping(self, dataflow_id: str, entity: str) -> dict:
         cur = self.cur()
+        stage = self.stage_use(cur, dataflow_id, entity)
+        if stage:
+            return {"attributes": [], "layouts": [], "table": stage["upstream_table"], "kind": "stage", "mode": "stage", "stage": stage}
         kind, targets, plan = self.mapping_targets(cur, dataflow_id, entity)
         saved: dict[str, dict] = {}
         for lh, nh, a in cur.execute("SELECT layout_hash, norm_header, attribute FROM column_mappings "
                                      "WHERE entity = ? AND kind = ?", [entity, kind]).fetchall():
             saved.setdefault(lh, {})[nh] = a
         pending = {w["layout_hash"] for w in ml.pending_sheets(cur, entity, kind=kind)}
+        ignored = {r[0] for r in cur.execute("SELECT layout_hash FROM layout_ignores WHERE entity = ?", [entity]).fetchall()}
         out = []
         for lay in self.layouts():
             sugg = df.suggest_mapping(lay["norm_headers"], [a["name"] for a in targets])
             lay["saved"] = saved.get(lay["layout_hash"], {})
             lay["suggested"] = {h: s for h, s in sugg.items() if h not in lay["saved"]}
             lay["pending"] = lay["layout_hash"] in pending
+            lay["ignored"] = lay["layout_hash"] in ignored
             out.append(lay)
         return {"attributes": targets, "layouts": out, "table": ml.table_for(cur, entity), "kind": kind,
                 "mode": plan["mode"]}
@@ -213,6 +252,7 @@ class App:
                 "use_m": plan["use_m"], "explicit": bool(plan["settings"]), "override_sql": st.get("override_sql", ""),
                 "accept_partial": st.get("accept_partial", False), "extra_inputs": st.get("extra_inputs", []),
                 "has_m": bool(p.steps) or bool(p.error), "bindings": tf.bindings(cur, dataflow_id),
+                "coverholder_bindings": tf.coverholder_bindings(cur, dataflow_id),
                 "date_order": plan["date_order"], "culture": plan["culture"], "date_order_source": plan["date_order_source"],
                 "date_order_setting": st.get("date_order", "auto"), "outputs": [], "missing_attributes": [], "sql_error": ""}
         if plan["sql"]:
@@ -364,6 +404,18 @@ def make_handler(app: App, port: int):
                 return app.transform(qs["dataflow_id"], qs["entity"])
             if path == "/api/schema":
                 return q.schema(cur)
+            if path == "/api/coverholders":
+                return pl.coverholders(cur)
+            if path == "/api/pipelines":
+                return pl.list_pipelines(cur)
+            if path == "/api/pipelines/status":
+                return pl.status_matrix(cur, qs["pipeline_id"])
+            if path == "/api/files/stored":
+                like = f"%{qs.get('search', '').lower()}%"
+                rows = cur.execute("SELECT name, rel_path, coverholder, sha256, size_bytes FROM v_files WHERE content_stored "
+                                   "AND lower(extension) IN ('.xlsx', '.xlsm') AND lower(rel_path) LIKE ? ORDER BY rel_path LIMIT 200",
+                                   [like]).fetchall()
+                return [dict(zip(["name", "rel_path", "coverholder", "sha256", "size"], r)) for r in rows]
             if path == "/api/loads":
                 rows = cur.execute("SELECT load_id, entity, source_path, sheet, rows_loaded, rows_skipped_empty, coerce_error_cells, "
                                    "status, error, finished_utc::VARCHAR FROM load_log ORDER BY finished_utc DESC LIMIT 200").fetchall()
@@ -409,11 +461,14 @@ def make_handler(app: App, port: int):
             if path == "/api/transform/preview":
                 return app.transform_preview(b)
             if path == "/api/bindings/save":
-                cur.execute("DELETE FROM query_bindings WHERE dataflow_id = ? AND query_name = ?", [b["dataflow_id"], b["query_name"]])
+                ch = b.get("coverholder") or ""
+                cur.execute("DELETE FROM query_bindings WHERE dataflow_id = ? AND query_name = ? AND coverholder = ?",
+                            [b["dataflow_id"], b["query_name"], ch])
                 if b.get("table_name"):
                     if not cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [b["table_name"]]).fetchone():
                         raise LookupError(f"Table {b['table_name']!r} does not exist")
-                    cur.execute("INSERT INTO query_bindings VALUES (?, ?, ?)", [b["dataflow_id"], b["query_name"], b["table_name"]])
+                    cur.execute("INSERT INTO query_bindings (dataflow_id, query_name, table_name, coverholder) VALUES (?, ?, ?, ?)",
+                                [b["dataflow_id"], b["query_name"], b["table_name"], ch])
                 return {"ok": True}
             if path == "/api/export/databricks":
                 from .export import export_databricks
@@ -424,6 +479,19 @@ def make_handler(app: App, port: int):
                                       b.get("schema", "bordereaux"), b.get("volume_path") or "/Volumes/<catalog>/<schema>/<volume>/sp_profiler")
                 return {k: m[k] for k in ("export_id", "mode", "path", "skipped")} | {
                     "tables": [{"name": x["name"], "kind": x["kind"], "rows": x["rows"], "files": len(x["files"])} for x in m["tables"]]}
+            if path == "/api/pipelines/save":
+                pid = pl.save_pipeline(cur, b["name"], b["stages"], b.get("overrides"), b.get("pipeline_id") or None)
+                return pl.get_pipeline(cur, pid)
+            if path == "/api/pipelines/delete":
+                pl.delete_pipeline(cur, b["pipeline_id"])
+                return {"ok": True}
+            if path == "/api/pipelines/run":
+                return {"job": app.start_pipeline_run(b)}
+            if path == "/api/mapping/ignore":
+                ml.set_layout_ignored(cur, b["entity"], b["layout_hash"], bool(b.get("ignored")))
+                return {"ok": True}
+            if path == "/api/reference/import-stored":
+                return tf.import_reference_stored(cur, b["sha256"], b.get("table_name", ""), b.get("sheet", ""))
             if path == "/api/reference/import":
                 return tf.import_reference(cur, b["path"], b.get("table_name", ""), b.get("sheet", ""))
             if path == "/api/sql":

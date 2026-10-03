@@ -12,8 +12,22 @@ def dataflow_queries(con, dataflow_id: str) -> dict[str, str]:
     return dict(con.execute("SELECT name, m_query FROM dataflow_queries WHERE dataflow_id = ?", [dataflow_id]).fetchall())
 
 
-def bindings(con, dataflow_id: str) -> dict[str, str]:
-    return dict(con.execute("SELECT query_name, table_name FROM query_bindings WHERE dataflow_id = ?", [dataflow_id]).fetchall())
+def bindings(con, dataflow_id: str, coverholder: str = "") -> dict[str, str]:
+    """Lookup query -> table. Bindings for the named coverholder override the shared ('') ones."""
+    out: dict[str, str] = {}
+    rows = con.execute("SELECT query_name, table_name, coverholder FROM query_bindings WHERE dataflow_id = ? "
+                       "AND coverholder IN ('', ?) ORDER BY coverholder", [dataflow_id, coverholder or ""]).fetchall()
+    for name, table, _ in rows:                    # '' sorts first, so the coverholder's own binding wins
+        out[name] = table
+    return out
+
+
+def coverholder_bindings(con, dataflow_id: str) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    for name, table, ch in con.execute("SELECT query_name, table_name, coverholder FROM query_bindings WHERE dataflow_id = ? "
+                                       "AND coverholder <> ''", [dataflow_id]).fetchall():
+        out.setdefault(ch, {})[name] = table
+    return out
 
 
 def entity_tables(con, dataflow_id: str) -> dict[str, str]:
@@ -26,9 +40,9 @@ def entity_tables(con, dataflow_id: str) -> dict[str, str]:
     return out
 
 
-def settings(con, entity: str) -> Optional[dict]:
+def settings(con, dataflow_id: str, entity: str) -> Optional[dict]:
     r = con.execute("SELECT use_m, override_sql, accept_partial, extra_inputs, date_order FROM entity_transforms "
-                    "WHERE entity = ?", [entity]).fetchone()
+                    "WHERE dataflow_id = ? AND entity = ?", [dataflow_id, entity]).fetchone()
     return None if not r else {"use_m": r[0], "override_sql": r[1] or "", "accept_partial": bool(r[2]),
                                "extra_inputs": r[3] or [], "date_order": r[4] or "auto"}
 
@@ -37,7 +51,7 @@ def save_settings(con, dataflow_id: str, entity: str, use_m: bool, override_sql:
                   extra_inputs: list[str], date_order: str = "auto") -> None:
     if date_order not in ("auto", "DMY", "MDY"):
         raise ValueError("date_order must be auto, DMY or MDY")
-    con.execute("DELETE FROM entity_transforms WHERE entity = ?", [entity])
+    con.execute("DELETE FROM entity_transforms WHERE dataflow_id = ? AND entity = ?", [dataflow_id, entity])
     con.execute("INSERT INTO entity_transforms (entity, dataflow_id, use_m, override_sql, accept_partial, extra_inputs, "
                 "date_order) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [entity, dataflow_id, use_m, override_sql.strip(), accept_partial, extra_inputs, date_order])
@@ -45,7 +59,7 @@ def save_settings(con, dataflow_id: str, entity: str, use_m: bool, override_sql:
 
 def date_order(con, dataflow_id: str, entity: str) -> tuple[str, str, str]:
     """(order, culture, source): 'DMY'/'MDY' from the entity setting, else from the dataflow culture."""
-    st = settings(con, entity)
+    st = settings(con, dataflow_id, entity)
     row = con.execute("SELECT culture FROM dataflows WHERE dataflow_id = ?", [dataflow_id]).fetchone()
     culture = (row[0] if row else "") or ""
     if st and st["date_order"] in ("DMY", "MDY"):
@@ -53,15 +67,15 @@ def date_order(con, dataflow_id: str, entity: str) -> tuple[str, str, str]:
     return date_order_for_culture(culture), culture, "culture"
 
 
-def translate(con, dataflow_id: str, entity: str) -> Pipeline:
-    return Translator(dataflow_queries(con, dataflow_id), bindings(con, dataflow_id),
+def translate(con, dataflow_id: str, entity: str, coverholder: str = "") -> Pipeline:
+    return Translator(dataflow_queries(con, dataflow_id), bindings(con, dataflow_id, coverholder),
                       entity_tables(con, dataflow_id), date_order(con, dataflow_id, entity)[0]).translate(entity)
 
 
-def resolve(con, dataflow_id: str, entity: str) -> dict:
+def resolve(con, dataflow_id: str, entity: str, coverholder: str = "") -> dict:
     """Decide what a load will run: {mode: 'm'|'attribute', sql, inputs, status, pipeline, ...}."""
-    p = translate(con, dataflow_id, entity)
-    st = settings(con, entity)
+    p = translate(con, dataflow_id, entity, coverholder)
+    st = settings(con, dataflow_id, entity)
     use = (st["use_m"] if st else p.complete)            # no explicit choice: auto-on only if fully translated
     extra = (st or {}).get("extra_inputs", [])
     order, culture, order_src = date_order(con, dataflow_id, entity)
@@ -115,14 +129,23 @@ def stage_sample(con, plan: dict, entity: str, layout_hash: str, sample_rows: in
     return len(staged)
 
 
-def import_reference(con, path: str, table_name: str = "", sheet: str = "") -> dict:
-    """Load a CSV/Excel lookup file into ``ref_<name>`` (all columns VARCHAR) so a query can be bound to it."""
+def _ref_name(stem: str) -> str:
     import re
+    return "ref_" + (re.sub(r"[^0-9a-zA-Z]+", "_", stem).strip("_").lower() or "table")
+
+
+def import_reference(con, path: str, table_name: str = "", sheet: str = "", *, source_id: str = "", sha256: str = "") -> dict:
+    """Load a CSV/Excel lookup file into ``ref_<name>`` (all columns VARCHAR) so a query can be bound to it.
+
+    The import is remembered (``reference_tables``) so ``refresh_references`` can re-import it when the file changes.
+    """
+    import hashlib
     from pathlib import Path
+    from .bulk import bulk_insert
     from .inspect_excel import detect_header_row
-    from .m2sql import q
+    from .m2sql import q, stage_value
     p = Path(path).expanduser()
-    name = table_name or "ref_" + re.sub(r"[^0-9a-zA-Z]+", "_", p.stem).strip("_").lower()
+    name = table_name or _ref_name(p.stem)
     if not name.replace("_", "").isalnum():
         raise ValueError("Table name may only contain letters, digits and underscores")
     if p.suffix.lower() == ".csv":
@@ -138,14 +161,61 @@ def import_reference(con, path: str, table_name: str = "", sheet: str = "") -> d
         hi = detect_header_row(all_rows[:50], 2)
         if hi is None:
             raise ValueError("Could not find a header row")
-        hdr = [str(c).strip() if c is not None and str(c).strip() else f"Column{i + 1}" for i, c in enumerate(all_rows[hi])]
-        from .m2sql import stage_value
+        from .export import delta_safe_names           # unique, safe names even if the sheet repeats a header
+        raw = [str(c).strip() if c is not None and str(c).strip() else f"Column{i + 1}" for i, c in enumerate(all_rows[hi])]
+        hdr = delta_safe_names(raw) if len({h.lower() for h in raw}) != len(raw) else raw
         con.execute(f"CREATE OR REPLACE TABLE {q(name)} ({', '.join(q(h) + ' VARCHAR' for h in hdr)})")
         data = [[stage_value(v) for v in (r + (None,) * len(hdr))[:len(hdr)]] for r in all_rows[hi + 1:]
                 if any(v is not None for v in r)]
-        if data:
-            con.executemany(f"INSERT INTO {q(name)} VALUES ({', '.join('?' for _ in hdr)})", data)
+        bulk_insert(con, name, hdr, data)
     else:
         raise ValueError("Only .csv, .xlsx and .xlsm reference files are supported")
+    sha = sha256 or hashlib.sha256(p.read_bytes()).hexdigest()
+    con.execute("DELETE FROM reference_tables WHERE table_name = ?", [name])
+    con.execute("INSERT INTO reference_tables (table_name, source_id, source_path, sheet, sha256) VALUES (?, ?, ?, ?, ?)",
+                [name, source_id or None, str(p) if not source_id else None, sheet, sha])
     return {"table": name, "rows": con.execute(f"SELECT count(*) FROM {q(name)}").fetchone()[0],
             "columns": [r[0] for r in con.execute(f"SELECT column_name FROM (DESCRIBE {q(name)})").fetchall()]}
+
+
+def import_reference_stored(con, sha256: str, table_name: str = "", sheet: str = "") -> dict:
+    """Import a lookup workbook that was profiled with its bytes stored (e.g. the mapping file in a coverholder folder)."""
+    import tempfile
+    from pathlib import Path
+    row = con.execute("SELECT name, COALESCE(NULLIF(item_id, ''), location, rel_path) FROM v_files WHERE sha256 = ? LIMIT 1",
+                      [sha256]).fetchone()
+    if not row:
+        raise LookupError("No profiled file with that content")
+    with tempfile.TemporaryDirectory(prefix="sp_ref_") as tmp:
+        path = Path(tmp) / row[0]
+        path.write_bytes(read_blob(con, sha256))
+        return import_reference(con, str(path), table_name or _ref_name(Path(row[0]).stem), sheet, source_id=row[1], sha256=sha256)
+
+
+def refresh_references(con) -> list[dict]:
+    """Re-import lookup tables whose source file changed since they were imported. Returns what was refreshed."""
+    import hashlib
+    from pathlib import Path
+    refreshed = []
+    for table, source_id, path, sheet, sha in con.execute(
+            "SELECT table_name, source_id, source_path, sheet, sha256 FROM reference_tables").fetchall():
+        try:
+            if source_id:
+                cur = con.execute("SELECT sha256 FROM v_files WHERE COALESCE(NULLIF(item_id, ''), location, rel_path) = ? "
+                                  "AND sha256 <> '' LIMIT 1", [source_id]).fetchone()
+                if cur and cur[0] != sha:
+                    info = import_reference_stored(con, cur[0], table, sheet or "")
+                    refreshed.append({"table": table, "rows": info["rows"], "reason": "source file changed"})
+            elif path and Path(path).exists() and hashlib.sha256(Path(path).read_bytes()).hexdigest() != sha:
+                info = import_reference(con, path, table, sheet or "")
+                refreshed.append({"table": table, "rows": info["rows"], "reason": "source file changed"})
+        except Exception as e:          # a broken lookup must not stop the pipeline; the stage using it will report
+            refreshed.append({"table": table, "error": f"{type(e).__name__}: {e}"})
+    return refreshed
+
+
+def table_fingerprint(con, table: str) -> str:
+    """Cheap content signature of a table (row count + order-independent row hash), for change detection."""
+    from .m2sql import q
+    n, h = con.execute(f"SELECT count(*), coalesce(bit_xor(hash(t)), 0) FROM {q(table)} t").fetchone()
+    return f"{n}:{h}"

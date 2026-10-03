@@ -277,7 +277,7 @@ def test_reimported_dataflow_inherits_bindings_and_settings(tmp_path):
     m1 = json.loads(json.dumps(T.MODEL))
     did1, _ = df.store_dataflow(con, df.parse_model_json(json.dumps(m1)))
     con.execute("CREATE TABLE ref_fx (code VARCHAR)")
-    con.execute("INSERT INTO query_bindings VALUES (?, 'Currencies', 'ref_fx')", [did1])
+    con.execute("INSERT INTO query_bindings (dataflow_id, query_name, table_name) VALUES (?, 'Currencies', 'ref_fx')", [did1])
     tf.save_settings(con, did1, "Policies", True, "", True, [], "MDY")
     m2 = json.loads(json.dumps(T.MODEL))
     m2["entities"][1]["attributes"].append({"name": "Extra", "dataType": "string"})        # new version of the same dataflow
@@ -285,9 +285,10 @@ def test_reimported_dataflow_inherits_bindings_and_settings(tmp_path):
     did2, new = df.store_dataflow(con, p2)
     assert new and did2 != did1 and p2["carried"] == {"from": did1, "bindings": 1, "settings": 1}
     assert tf.bindings(con, did2) == {"Currencies": "ref_fx"}
-    st = tf.settings(con, "Policies")
+    st = tf.settings(con, did2, "Policies")
     assert st["accept_partial"] and st["date_order"] == "MDY"
-    assert con.execute("select dataflow_id from entity_transforms").fetchone()[0] == did2
+    assert tf.settings(con, did1, "Policies") is not None                            # the old version keeps its own copy
+    assert {r[0] for r in con.execute("select dataflow_id from entity_transforms").fetchall()} == {did1, did2}
 
 
 # ------------------------------------------------------------------ Windows paths

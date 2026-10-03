@@ -155,6 +155,8 @@ class Pipeline:
     references: dict = field(default_factory=dict)
     complete: bool = False
     error: str = ""
+    warnings: list = field(default_factory=list)
+    source_kinds: set = field(default_factory=set)      # 'file' (Excel/CSV/SharePoint) and/or 'dataflow' (linked entity)
     dynamic_columns: bool = False        # UnpivotOtherColumns: every other sheet column must be staged, not just the inputs
 
     def sql(self, final: Optional[str] = None, limit: Optional[int] = None) -> str:
@@ -203,6 +205,7 @@ class Translator:
         self.p = Pipeline(entity)
         self._n = 0
         self._query_rels = {}
+        self._raw_used: set[str] = set()
         self.p.ctes.append(("src", 'SELECT * FROM "_stg"'))
         if entity in self.parse_errors:
             self.p.error = f"Could not parse M: {self.parse_errors[entity]}"
@@ -250,6 +253,8 @@ class Translator:
         if t == "call" and e["fn"]["t"] == "id":
             fn = e["fn"]["name"]
             if fn.startswith(SOURCE_FUNCS):
+                if getattr(self, "_main_ctx", False):
+                    self.p.source_kinds.add("dataflow" if fn.startswith("PowerPlatform.") else "file")
                 return True
         return False
 
@@ -258,6 +263,7 @@ class Translator:
         if qname in self._resolving:
             raise Unsupported(f"circular reference through {qname!r}")
         self._resolving.append(qname)
+        outer_ctx, self._main_ctx = getattr(self, "_main_ctx", False), main
         try:
             ast = self.queries[qname]
             if ast["t"] != "let":
@@ -286,6 +292,7 @@ class Translator:
             return self._promote(last, main) if last else None
         finally:
             self._resolving.pop()
+            self._main_ctx = outer_ctx
 
     @staticmethod
     def _head(e) -> str:
@@ -309,6 +316,11 @@ class Translator:
         if e["t"] == "id":
             n = e["name"]
             if n in scope:
+                if scope[n].raw and main:
+                    self._raw_used.add(n)
+                    if len(self._raw_used) == 2:
+                        self.p.warnings.append("This query reads more than one external source; all of them are bound to the single "
+                                               "input of this stage, so a Table.Combine of them would repeat the same rows.")
                 return self._promote(scope[n], main)
             return self._resolve_query(n)
         return self._promote(self._step(e, scope, main, qname), main)

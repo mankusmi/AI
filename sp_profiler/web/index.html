@@ -23,10 +23,12 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
 .bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;min-width:80px}.bar i{display:block;height:100%;background:var(--acc)}
 .bar.n i{background:var(--bad)}.pill{display:inline-block;padding:0 .5rem;border-radius:99px;background:var(--acc2);color:var(--acc);font-size:12px}
 .prog{height:10px;background:var(--line);border-radius:5px;overflow:hidden}.prog i{display:block;height:100%;background:var(--acc);transition:width .2s}
+.chip{display:inline-block;padding:0 .5rem;border-radius:99px;font-size:12px;cursor:pointer;border:1px solid var(--line)}
+.chip.ok{color:var(--ok);border-color:var(--ok)}.chip.warn{color:var(--warn);border-color:var(--warn)}.chip.bad{color:var(--bad);border-color:var(--bad)}
 .side{max-height:60vh;overflow:auto}.side div{cursor:pointer;padding:1px 4px}.side div:hover{background:var(--acc2)}
 </style></head><body>
 <header><h1>SP Profiler</h1><small id="state"></small>
-<nav><button data-t="src" class="on">1 · Sources</button><button data-t="df">2 · Dataflow</button><button data-t="map">3 · Map &amp; load</button><button data-t="sql">4 · Query &amp; profile</button></nav></header>
+<nav><button data-t="src" class="on">1 · Sources</button><button data-t="df">2 · Dataflow</button><button data-t="map">3 · Map &amp; load</button><button data-t="sql">4 · Query &amp; profile</button><button data-t="pipe">5 · Pipeline</button></nav></header>
 <main>
 <section id="src" class="on">
  <div class="row"><div class="card"><h2>Pick a folder or files (this computer)</h2>
@@ -36,6 +38,10 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
   <div style="margin-top:.6rem;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
    <button class="b p" id="pfolder">Profile this folder (recursive)</button><button class="b" id="pfiles">Profile ticked files</button>
    <label class="mute"><input type="checkbox" id="store" checked> keep file bytes</label></div>
+  <div class="mute" style="margin-top:.5rem">Coverholder: <label><input type="radio" name="chmode" value="folder" checked> this folder is one coverholder</label>
+   <label style="margin-left:.6rem"><input type="radio" name="chmode" value="subfolders"> each subfolder is one</label>
+   <label style="margin-left:.6rem"><input type="radio" name="chmode" value="none"> none</label>
+   <input type="text" id="chname" placeholder="or type a name for all of these files" style="margin-top:.3rem"></div>
   <details style="margin-top:.6rem"><summary class="mute">More options</summary>
    <div style="display:grid;gap:.4rem;margin-top:.4rem">
     <input type="text" id="blobdir" placeholder="store file bytes in this folder instead of inside DuckDB (optional)">
@@ -65,10 +71,27 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
   <span class="mute" id="mtable"></span></div></div>
  <div id="mtransform"></div>
  <div id="mlayouts"></div>
- <div class="card"><h2>Append mapped rows to DuckDB</h2><p class="mute">Loads every stored sheet whose layout has a saved mapping and that hasn't been loaded yet (same content + sheet is never loaded twice unless forced).</p>
+ <div class="card" id="mloadcard"><h2>Append mapped rows to DuckDB</h2><p class="mute">Loads every stored sheet whose layout has a saved mapping and that hasn't been loaded yet (same content + sheet is never loaded twice unless forced).</p>
   <button class="b p" id="mload">Load / append now</button> <label class="mute"><input type="checkbox" id="mforce"> force reload (replaces rows already loaded from those sheets)</label>
   <div class="prog" style="margin:.6rem 0"><i id="lbar" style="width:0"></i></div><div id="lmsg" class="mono mute"></div><div id="lres"></div>
   <h2 style="margin-top:1rem">Load log</h2><div id="loglist" class="scroll"></div></div>
+</section>
+<section id="pipe">
+ <div class="card"><h2>Coverholders <span class="mute" style="font-weight:400">(from the files you profiled; tick some to run only those, none = all)</span></h2><div id="chlist" class="scroll"></div></div>
+ <div class="card"><h2>Pipeline</h2>
+  <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.6rem">
+   <select id="pselect"></select><button class="b" id="pnew">New</button><input type="text" id="pname" placeholder="pipeline name" style="flex:1 1 200px">
+   <button class="b p" id="psave">Save</button><button class="b" id="pdel">Delete</button><span id="pmsg2" class="mute"></span></div>
+  <div class="mute" style="margin-bottom:.4rem">Stage 1 applies a dataflow to each coverholder's files. Later stages apply a dataflow to the previous stage's output, per coverholder; a <b>merge</b> stage runs once over all coverholders when they are done.</div>
+  <div id="pstages"></div>
+  <div style="margin-top:.5rem;display:flex;gap:.5rem;align-items:center"><select id="paddkind"><option value="stage">per-coverholder stage</option><option value="merge">merge stage</option></select><button class="b" id="padd">Add stage</button></div>
+  <details style="margin-top:.6rem"><summary class="mute">Different dataflow for one coverholder (optional)</summary><div id="povr" style="margin-top:.4rem"></div><button class="b" id="povradd" style="margin-top:.3rem">Add override</button></details></div>
+ <div class="card"><h2>Run</h2>
+  <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center"><button class="b p" id="prun">Run pipeline</button>
+   <label class="mute"><input type="checkbox" id="pforce"> redo everything (ignore "unchanged")</label>
+   <label class="mute"><input type="checkbox" id="ppartial"> merge even if some coverholders are not ready</label></div>
+  <div class="prog" style="margin:.6rem 0"><i id="prbar" style="width:0"></i></div><div id="prmsg" class="mono mute"></div></div>
+ <div class="card"><h2>Status <span class="mute" style="font-weight:400" id="pstime"></span></h2><div id="pstatus"></div><div id="pdetail" style="margin-top:.5rem"></div></div>
 </section>
 <section id="sql">
  <div class="row" style="flex-wrap:nowrap"><div class="card" style="flex:0 0 260px"><h2>Tables &amp; views</h2><div class="side" id="schema"></div></div>
@@ -96,7 +119,7 @@ async function api(path,body){const r=await fetch(path,{method:body?"POST":"GET"
 const fmt=n=>n==null?"":typeof n==="number"?(Number.isInteger(n)?n.toLocaleString():n.toLocaleString(undefined,{maximumFractionDigits:4})):String(n);
 const size=b=>b==null?"":b<1024?b+" B":b<1048576?(b/1024).toFixed(1)+" KB":(b/1048576).toFixed(1)+" MB";
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{document.querySelectorAll("nav button,section").forEach(x=>x.classList.remove("on"));b.classList.add("on");$("#"+b.dataset.t).classList.add("on");
- ({src:loadLayouts,df:loadDataflows,map:initMap,sql:loadSchema})[b.dataset.t]()});
+ ({src:loadLayouts,df:loadDataflows,map:initMap,sql:loadSchema,pipe:initPipeline})[b.dataset.t]()});
 async function refreshState(){const s=await api("/api/state");$("#state").textContent=`${s.db} · ${s.files} files · ${s.layouts} layouts · ${s.dataflows} dataflows`;return s}
 async function pollJob(id,bar,msg,done){for(;;){const j=await api("/api/jobs/"+id);const pct=j.total?100*j.done/j.total:(j.status==="done"?100:0);
  $(bar).style.width=(j.total?pct:Math.min(95,j.done*2))+"%";$(msg).textContent=j.status==="running"?`${j.done}${j.total?"/"+j.total:""}  ${j.message}`:"";
@@ -113,7 +136,7 @@ function fsBrowser(listSel,pathSel,{onFile,ticks}){let cur="";
 const fb=fsBrowser("#fslist","#fspath",{ticks:true});
 $("#fsgo").onclick=()=>fb.go($("#fspath").value);$("#fsall").onchange=()=>fb.go(fb.cur());
 async function startProfile(body){body.store_content=$("#store").checked;body.blob_dir=$("#blobdir").value.trim();body.workers=parseInt($("#workers").value)||0;
- body.include_hidden=$("#hidden").checked;body.exact_rows=$("#exactrows").checked;body.refresh=$("#refresh").checked;$("#pres").textContent="";
+ body.coverholder_mode=document.querySelector("input[name=chmode]:checked").value;body.coverholder=$("#chname").value.trim();body.include_hidden=$("#hidden").checked;body.exact_rows=$("#exactrows").checked;body.refresh=$("#refresh").checked;$("#pres").textContent="";
  try{const{job}=await api("/api/profile/start",body);const j=await pollJob(job,"#pbar","#pmsg");
  const sm=j.result?.summary||{};$("#pres").replaceChildren(j.status==="done"?h("div",{class:sm.files_with_warnings?"warn":"ok"},`Done: ${sm.inspected_files} Excel files inspected${sm.reused_files?` (${sm.reused_files} unchanged, reused)`:""} · ${sm.distinct_layouts} layouts · ${JSON.stringify(sm.status_counts)}`+(sm.files_with_warnings?` · ${sm.files_with_warnings} file(s) with warnings (see files.warnings)`:"")):h("div",{class:"bad"},j.error));refreshState();loadLayouts()}catch(e){$("#pres").replaceChildren(h("div",{class:"bad"},e.message))}}
 $("#pfolder").onclick=()=>startProfile({folder:fb.cur()});
@@ -137,18 +160,21 @@ function dateOrderControl(tr,dfid,ent,after){const sel=h("select",{},h("option",
  sel.value=tr.date_order_setting||"auto";const msg=h("span",{class:"mute"});
  const box=h("div",{style:"margin:.5rem 0"},"Text dates are read ",sel," ",h("span",{class:"mute"},`→ currently ${tr.date_order==="MDY"?"month first":"day first"}`+(tr.culture?` (dataflow culture ${tr.culture})`:" (dataflow has no culture)")),msg);
  return{box,sel,save:async()=>{}}}
-async function loadTransform(){const box=$("#mtransform");box.replaceChildren();
+let TGEN=0,MGEN=0,FLASH="";           // only the most recent load may render (quick dropdown changes start several)
+async function loadTransform(){const gen=++TGEN;const box=$("#mtransform");box.replaceChildren();
  const dfid=$("#mdf").value,ent=$("#ment").value;if(!dfid||!ent)return;
- let tr;try{tr=await api(`/api/transform?dataflow_id=${dfid}&entity=${encodeURIComponent(ent)}`)}catch(e){box.append(h("div",{class:"card bad"},e.message));return}
+ let tr;try{tr=await api(`/api/transform?dataflow_id=${dfid}&entity=${encodeURIComponent(ent)}`)}catch(e){if(gen===TGEN)box.append(h("div",{class:"card bad"},e.message));return}
+ if(gen!==TGEN)return;
  if(!tr.has_m){const d=dateOrderControl(tr,dfid,ent);const m=h("span",{class:"mute"});
   d.sel.onchange=async()=>{try{await api("/api/transform/save",{dataflow_id:dfid,entity:ent,use_m:false,accept_partial:false,override_sql:"",extra_inputs:[],date_order:d.sel.value});m.textContent=" saved";m.className="ok";loadMap()}catch(e){m.textContent=" "+e.message;m.className="bad"}};
   box.append(h("div",{class:"card"},h("div",{class:"mute"},"No Power Query code stored for this entity, so columns are mapped straight to attributes."),d.box,m));return}
- const tables=(await api("/api/schema")).filter(x=>x.kind==="table").map(x=>x.name);
+ const tables=(await api("/api/schema")).filter(x=>x.kind==="table").map(x=>x.name);if(gen!==TGEN)return;
+ const flash=FLASH;FLASH="";
  const useBox=h("input",{type:"checkbox"}),partBox=h("input",{type:"checkbox"});useBox.checked=tr.use_m;partBox.checked=tr.accept_partial;
  const ov=h("textarea",{rows:8,class:"mono",placeholder:"Optional: your own SELECT reading staged table _stg (columns = the input columns below, plus __row). Overrides the generated SQL."});ov.value=tr.override_sql;
  const extra=h("input",{type:"text",placeholder:"extra input columns for your SQL, comma separated"});extra.value=(tr.extra_inputs||[]).join(", ");
  const msg=h("span",{class:"mute"}),prev=h("div",{style:"margin-top:.6rem"});
- const laySel=h("select",{},...(await api("/api/layouts")).map(l=>h("option",{value:l.layout_hash},`${l.layout_hash} · ${l.example}`)));
+ const laySel=h("select",{},...(await api("/api/layouts")).map(l=>h("option",{value:l.layout_hash},`${l.layout_hash} · ${l.example}`)));if(gen!==TGEN)return;
  const dord=dateOrderControl(tr,dfid,ent);
  const save=async()=>{try{await api("/api/transform/save",{dataflow_id:dfid,entity:ent,use_m:useBox.checked,accept_partial:partBox.checked,override_sql:ov.value,extra_inputs:extra.value.split(","),date_order:dord.sel.value});msg.textContent="Saved";msg.className="ok";loadMap()}catch(e){msg.textContent=e.message;msg.className="bad"}};
  const preview=async step=>{prev.replaceChildren(h("span",{class:"mute"},"Running on a sample of the first stored file with that layout…"));
@@ -156,27 +182,38 @@ async function loadTransform(){const box=$("#mtransform");box.replaceChildren();
    prev.replaceChildren(h("div",{class:"mute"},`${step?"Output of step "+step:"Final output"} · ${r.staged_rows} sample row(s) staged · ${r.rows.length} shown`),h("div",{class:"scroll"},table(r.columns,r.rows)))}
   catch(e){prev.replaceChildren(h("div",{class:"bad"},e.message))}};
  const stepRows=tr.steps.map((s,i)=>[i+1,s.query===ent?"":s.query,s.name,s.func,s.ok?h("span",{class:"ok"},"✓ translated"):h("span",{class:"bad"},"✗ "+s.error),s.ok&&s.cte?h("button",{class:"b",on:{click:()=>preview(s.name)}},"Preview"):""]);
+ const chs=(await api("/api/coverholders")).map(c=>c.name).filter(Boolean);if(gen!==TGEN)return;
  const refs=Object.entries(tr.references).map(([n,r])=>{const sel=h("select",{},h("option",{value:""},"— none —"),...tables.map(x=>h("option",{value:x},x)));sel.value=tr.bindings[n]||"";
+  const chSel=h("select",{},h("option",{value:""},"all coverholders"),...chs.map(c=>h("option",{value:c},c)));
+  const specific=Object.entries(tr.coverholder_bindings||{}).filter(([c,b])=>b[n]).map(([c,b])=>`${c} → ${b[n]}`).join("; ");
+  chSel.onchange=()=>{sel.value=chSel.value?((tr.coverholder_bindings[chSel.value]||{})[n]||""):(tr.bindings[n]||"")};
   const bm=h("span",{class:"mute"});
-  return h("div",{style:"margin:.3rem 0"},h("b",{},n)," ",h("span",{class:"pill"},r.kind)," ",r.reason?h("span",{class:"bad"},r.reason+" "):"","bind to table: ",sel," ",
-   h("button",{class:"b",on:{click:async()=>{try{await api("/api/bindings/save",{dataflow_id:dfid,query_name:n,table_name:sel.value});bm.textContent="Bound";loadMap()}catch(e){bm.textContent=e.message;bm.className="bad"}}}},"Bind")," ",bm)});
+  return h("div",{style:"margin:.3rem 0"},h("b",{},n)," ",h("span",{class:"pill"},r.kind)," ",r.reason?h("span",{class:"bad"},r.reason+" "):"","bind to table: ",sel," for ",chSel," ",
+   h("button",{class:"b",on:{click:async()=>{try{await api("/api/bindings/save",{dataflow_id:dfid,query_name:n,table_name:sel.value,coverholder:chSel.value});bm.textContent="Bound";loadMap()}catch(e){bm.textContent=e.message;bm.className="bad"}}}},"Bind")," ",bm,specific?h("div",{class:"mute"},"per coverholder: "+specific):"")});
  const refPath=h("input",{type:"text",placeholder:"full path of a lookup .xlsx/.csv on this computer"}),refMsg=h("span",{class:"mute"});
+ const stored=await api("/api/files/stored");if(gen!==TGEN)return;const stSel=h("select",{},...stored.map(f=>h("option",{value:f.sha256},(f.coverholder?f.coverholder+" / ":"")+f.rel_path))),stSheet=h("input",{type:"text",placeholder:"sheet (first if blank)",style:"width:10rem"});
  const statusCls=tr.mode==="m"?"ok":tr.use_m?"warn":"mute";
- box.append(h("div",{class:"card"},h("h2",{},"Power Query transformation · ",h("span",{class:statusCls},tr.status)),
+ box.append(h("div",{class:"card"},h("h2",{},"Power Query transformation · ",h("span",{class:statusCls},tr.status)),flash?h("div",{class:"ok"},flash):"",
   h("div",{class:"mute"},tr.translated?"All steps were translated to SQL.":"Some steps are not supported: edit the SQL below or accept a partial translation (skipped steps are NOT applied)."),
   tr.error?h("div",{class:"bad"},tr.error):"",
   h("div",{style:"margin:.5rem 0"},h("label",{},useBox," use Power Query steps when loading "),h("label",{style:"margin-left:1rem"},partBox," accept partial translation")),dord.box,
   h("details",{open:tr.translated?null:true},h("summary",{},`Steps (${tr.steps.length})`),h("div",{class:"scroll"},table(["#","Query","Step","Function","Status",""],stepRows))),
   Object.keys(tr.references).length?h("div",{style:"margin-top:.6rem"},h("b",{},"Lookups / referenced queries"),...refs):"",
-  h("div",{style:"margin:.5rem 0"},"Import a lookup file as a table: ",refPath," ",h("button",{class:"b",on:{click:async()=>{try{const r=await api("/api/reference/import",{path:refPath.value});refMsg.textContent=`Created table ${r.table} (${r.rows} rows). Bind a lookup to it above.`;refMsg.className="ok";loadMap()}catch(e){refMsg.textContent=e.message;refMsg.className="bad"}}}},"Import")," ",refMsg),
+  h("div",{style:"margin:.5rem 0"},"Import a lookup workbook you already profiled: ",stSel," sheet ",stSheet," ",h("button",{class:"b",on:{click:async()=>{try{const r=await api("/api/reference/import-stored",{sha256:stSel.value,sheet:stSheet.value});FLASH=`Created table ${r.table} (${r.rows} rows). Bind a lookup to it below; it refreshes automatically when that file changes.`;loadMap()}catch(e){refMsg.textContent=e.message;refMsg.className="bad"}}}},"Import")),
+  h("div",{style:"margin:.5rem 0"},"…or a file path on this computer: ",refPath," ",h("button",{class:"b",on:{click:async()=>{try{const r=await api("/api/reference/import",{path:refPath.value});FLASH=`Created table ${r.table} (${r.rows} rows). Bind a lookup to it below.`;loadMap()}catch(e){refMsg.textContent=e.message;refMsg.className="bad"}}}},"Import")," ",refMsg),
   h("details",{},h("summary",{},"Generated SQL"),h("pre",{class:"mono mute scroll",style:"white-space:pre-wrap"},tr.generated_sql||"(none)")),
   h("div",{style:"margin-top:.5rem"},h("b",{},"SQL override"),ov,h("div",{style:"margin-top:.3rem"},extra)),
   tr.inputs.length?h("div",{class:"mute",style:"margin-top:.4rem"},"Input columns the steps read (map your sheet columns to these below): ",tr.inputs.join(", ")):"",
   tr.outputs.length?h("div",{style:"margin-top:.4rem"},"Output: ",tr.outputs.map(o=>o.name).join(", "),tr.missing_attributes.length?h("div",{class:"warn"},"Attributes the steps do not produce (will be NULL): "+tr.missing_attributes.join(", ")):h("div",{class:"ok"},"All dataflow attributes are produced.")):"",
   tr.sql_error?h("div",{class:"bad"},"SQL error: "+tr.sql_error):"",
   h("div",{style:"margin-top:.6rem;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center"},h("button",{class:"b p",on:{click:save}},"Save settings"),msg,h("span",{class:"mute",style:"margin-left:auto"},"Preview on layout:"),laySel,h("button",{class:"b",on:{click:()=>preview("")}},"Preview final output")),prev))}
-async function loadMap(){loadTransform();const box=$("#mlayouts");box.replaceChildren();if(!$("#mdf").value||!$("#ment").value){box.append(h("div",{class:"card mute"},"Import a dataflow first."));return}
- const m=await api(`/api/mapping?dataflow_id=${$("#mdf").value}&entity=${encodeURIComponent($("#ment").value)}`);$("#mtable").textContent="→ table "+m.table+(m.mode==="m"?" · mapping sheet columns to Power Query input columns":" · mapping sheet columns to attributes");
+async function loadMap(){loadTransform();const mgen=++MGEN;const box=$("#mlayouts");box.replaceChildren();$("#mloadcard").style.display="";if(!$("#mdf").value||!$("#ment").value){box.append(h("div",{class:"card mute"},"Import a dataflow first."));return}
+ const m=await api(`/api/mapping?dataflow_id=${$("#mdf").value}&entity=${encodeURIComponent($("#ment").value)}`);if(mgen!==MGEN)return;if(m.mode==="stage"){const s=m.stage;$("#mtable").textContent="";$("#mloadcard").style.display="none";
+  box.append(h("div",{class:"card"},h("h2",{},s.pipeline?"Pipeline stage: "+s.stage:"Reads another dataflow"),s.pipeline?h("div",{},`This dataflow is stage "${s.stage}" of pipeline "${s.pipeline}". It reads the output of "${s.upstream_stage}" (table `,h("span",{class:"mono"},s.upstream_table),"), so there are no sheet columns to map. It runs from the Pipeline tab."):h("div",{},"This dataflow's source is another dataflow's output (a linked entity), so there are no sheet columns to map. Use it as a later stage on the Pipeline tab: it will read the previous stage's output."),
+   h("div",{class:"mute",style:"margin-top:.4rem"},"Columns the steps read: "+(s.needs.join(", ")||"(none)")),
+   s.missing.length?h("div",{class:"bad"},"Not produced by the previous stage: "+s.missing.join(", ")+". Available: "+s.available.join(", ")):(s.pipeline?h("div",{class:"ok"},s.available.length?"All needed columns exist in the previous stage's output.":"The previous stage has not produced its table yet (run the pipeline)."):""),
+   h("div",{class:"mute",style:"margin-top:.4rem"},"Configure the Power Query steps, lookups and date order in the panel above.")));return}
+ $("#mtable").textContent="→ table "+m.table+(m.mode==="m"?" · mapping sheet columns to Power Query input columns":" · mapping sheet columns to attributes");
  if(!m.layouts.length)box.append(h("div",{class:"card mute"},"Profile some files first (step 1)."));
  for(const lay of m.layouts){const sels=[];
   const rows=lay.norm_headers.map((nh,i)=>{const sel=h("select",{"data-h":nh},h("option",{value:""},"— skip —"),...m.attributes.map(a=>h("option",{value:a.name},`${a.name} (${a.type})`)));
@@ -185,8 +222,10 @@ async function loadMap(){loadTransform();const box=$("#mlayouts");box.replaceChi
   const msg=h("span",{class:"mute"});
   const save=h("button",{class:"b p",on:{click:async()=>{try{const r=await api("/api/mapping/save",{dataflow_id:$("#mdf").value,entity:$("#ment").value,layout_hash:lay.layout_hash,pairs:sels.map(s=>({norm_header:s.dataset.h,attribute:s.value}))});msg.textContent=`Saved ${r.saved} mappings`;msg.className="ok"}catch(e){msg.textContent=e.message;msg.className="bad"}}}},"Save mapping");
   const unm=m.attributes.filter(a=>!sels.some(s=>s.value===a.name)).length;
-  box.append(h("details",{class:"card",open:(lay.pending||!Object.keys(lay.saved).length)||null},h("summary",{},h("b",{},lay.layout_hash)," · ",lay.files," file(s) · ",lay.norm_headers.length," columns · ",unm?h("span",{class:"warn"},unm+" target(s) unmapped · "):"",lay.pending?h("span",{class:"warn"},"has unloaded data"):"",Object.keys(lay.saved).length?h("span",{class:"ok"}," · mapped"):h("span",{class:"mute"}," · not mapped yet")),
-   h("div",{class:"scroll",style:"margin:.5rem 0"},table(["#","Source column","Status",m.mode==="m"?"→ Power Query input column":"→ Target attribute"],rows)),save," ",msg,h("div",{class:"mute"},"Example: "+lay.example)))}}
+  const ign=h("label",{class:"mute",style:"margin-left:1rem"},h("input",{type:"checkbox",on:{change:async e=>{await api("/api/mapping/ignore",{entity:$("#ment").value,layout_hash:lay.layout_hash,ignored:e.target.checked});loadMap()}}})," not a bordereau (ignore)");
+  ign.querySelector("input").checked=!!lay.ignored;
+  box.append(h("details",{class:"card",open:(!lay.ignored&&(lay.pending||!Object.keys(lay.saved).length))||null},h("summary",{},h("b",{},lay.layout_hash)," · ",(lay.coverholders&&lay.coverholders.length)?[h("span",{class:"pill"},lay.coverholders.join(", ")),"  ·  "]:"",lay.ignored?h("span",{class:"mute"},"ignored · "):"",lay.files," file(s) · ",lay.norm_headers.length," columns · ",unm?h("span",{class:"warn"},unm+" target(s) unmapped · "):"",lay.pending?h("span",{class:"warn"},"has unloaded data"):"",Object.keys(lay.saved).length?h("span",{class:"ok"}," · mapped"):h("span",{class:"mute"}," · not mapped yet")),
+   h("div",{class:"scroll",style:"margin:.5rem 0"},table(["#","Source column","Status",m.mode==="m"?"→ Power Query input column":"→ Target attribute"],rows)),save," ",ign," ",msg,h("div",{class:"mute"},"Example: "+lay.example)))}}
 $("#mload").onclick=async()=>{$("#lres").replaceChildren();try{const{job}=await api("/api/load/start",{dataflow_id:$("#mdf").value,entity:$("#ment").value,force:$("#mforce").checked});
  const j=await pollJob(job,"#lbar","#lmsg");$("#lres").replaceChildren(j.status==="done"?h("div",{class:j.result.sheets_failed?"warn":"ok"},`Loaded ${fmt(j.result.rows)} rows from ${j.result.sheets_loaded} sheet(s) into ${j.result.table}`+(j.result.replaced_rows?` (replaced ${fmt(j.result.replaced_rows)} earlier rows)`:"")+`; ${j.result.sheets_failed} failed; ${fmt(j.result.coerce_error_cells)} cells couldn't be converted (NULL, see _coerce_errors).`+(j.result.ambiguous_dates?` ${fmt(j.result.ambiguous_dates)} text dates could be read day-first or month-first; they were read ${j.result.date_order==="MDY"?"month":"day"}-first.`:"")+(j.result.sheets_planned?"":" Nothing pending: save a mapping first, or tick force reload.")):h("div",{class:"bad"},j.error));loadLog();loadMap()}catch(e){$("#lres").replaceChildren(h("div",{class:"bad"},e.message))}};
 async function loadLog(){const l=await api("/api/loads");$("#loglist").replaceChildren(l.length?table(["When","Entity","File","Sheet","Rows","Empty","Bad cells","Status"],l.map(x=>[x.finished?.slice(0,19),x.entity,x.source_path,x.sheet,fmt(x.rows_loaded),fmt(x.rows_skipped_empty),fmt(x.coerce_error_cells),x.error?x.status+": "+x.error:x.status])):h("div",{class:"mute",style:"padding:.5rem"},"No loads yet."))}
@@ -212,6 +251,53 @@ $("#xgo").onclick=async()=>{$("#xmsg").textContent="exporting…";$("#xmsg").cla
  try{const r=await api("/api/export/databricks",{out:$("#xout").value,volume_path:$("#xvol").value,catalog:$("#xcat").value,schema:$("#xsch").value,incremental:$("#xinc").checked,include_blobs:$("#xblob").checked});
   $("#xmsg").textContent=`Done → ${r.path} · ${r.tables.map(x=>x.name+" ("+fmt(x.rows)+")").join(", ")}`+(r.skipped.length?` · skipped: ${r.skipped.map(s=>s.table+" ("+s.reason+")").join(", ")}`:"");$("#xmsg").className="ok"}
  catch(e){$("#xmsg").textContent=e.message;$("#xmsg").className="bad"}};
+// ---------- pipeline
+let PL=[],PCUR=null,DFS=[],CHS=[];
+const blankPipe=()=>({pipeline_id:"",name:"",stages:[],overrides:[]});
+async function initPipeline(){[DFS,CHS,PL]=await Promise.all([api("/api/dataflows"),api("/api/coverholders"),api("/api/pipelines")]);
+ $("#chlist").replaceChildren(CHS.length?table(["Run","Coverholder","Files","Stored","Layouts","Last modified","Warnings"],CHS.map(c=>[h("input",{type:"checkbox","data-ch":c.name,disabled:!c.name||!c.stored}),c.name||h("span",{class:"mute"},"(no coverholder: lookup files etc.)"),c.files,c.stored,c.layouts,(c.last_modified||"").slice(0,19),c.warned||""])):h("div",{class:"mute",style:"padding:.5rem"},"Profile the coverholder folders first (step 1)."));
+ const s=$("#pselect");s.replaceChildren(h("option",{value:""},"— new pipeline —"),...PL.map(p=>h("option",{value:p.pipeline_id},p.name)));
+ if(!PCUR||!PL.find(p=>p.pipeline_id===PCUR.pipeline_id))PCUR=PL[0]?JSON.parse(JSON.stringify(PL[0])):blankPipe();s.value=PCUR.pipeline_id||"";renderPipe();refreshStatus()}
+$("#pselect").onchange=()=>{const p=PL.find(x=>x.pipeline_id===$("#pselect").value);PCUR=p?JSON.parse(JSON.stringify(p)):blankPipe();renderPipe();refreshStatus()};
+$("#pnew").onclick=()=>{PCUR=blankPipe();$("#pselect").value="";renderPipe();$("#pstatus").replaceChildren();$("#pdetail").replaceChildren()};
+const dfSel=(val,on)=>{const s=h("select",{},h("option",{value:""},"— dataflow —"),...DFS.map(d=>h("option",{value:d.dataflow_id},`${d.name||"(unnamed)"} · ${d.dataflow_id}`)));s.value=val||"";s.onchange=()=>on(s.value);return s};
+const entSel=(dfid,val,on)=>{const d=DFS.find(x=>x.dataflow_id===dfid);const s=h("select",{},h("option",{value:""},"— entity —"),...(d?d.entities:[]).map(e=>h("option",{value:e.name},e.name)));s.value=val||"";s.onchange=()=>on(s.value);return s};
+function renderPipe(){$("#pname").value=PCUR.name;const box=$("#pstages");box.replaceChildren();
+ if(!PCUR.stages.length)PCUR.stages.push({name:"Normalise",kind:"files",dataflow_id:"",entity:"",output_table:""});
+ PCUR.stages.forEach((st,i)=>{const row=h("div",{style:"display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin:.35rem 0;padding:.4rem;border:1px solid var(--line);border-radius:6px"});
+  const ent=entSel(st.dataflow_id,st.entity,v=>st.entity=v);
+  const kindTxt=st.kind==="files"?"1 · files → dataflow":st.kind==="merge"?`${i+1} · merge`:`${i+1} · stage`;
+  const name=h("input",{type:"text",value:st.name,style:"width:9rem"});name.oninput=()=>st.name=name.value;
+  const out=h("input",{type:"text",value:st.output_table||"",placeholder:"output table (auto)",style:"width:11rem"});out.oninput=()=>st.output_table=out.value;
+  const inp=i===0?"":h("select",{},...PCUR.stages.slice(0,i).map((x,j)=>h("option",{value:j},"reads: "+(x.name||"stage "+(j+1)))));if(inp){inp.value=st.input_stage??(i-1);inp.onchange=()=>st.input_stage=parseInt(inp.value);st.input_stage=parseInt(inp.value)}
+  row.append(h("span",{class:"pill"},kindTxt),name,dfSel(st.dataflow_id,v=>{st.dataflow_id=v;st.entity="";renderPipe()}),ent,inp,out,i?h("button",{class:"b",on:{click:()=>{PCUR.stages.splice(i,1);PCUR.overrides=PCUR.overrides.filter(o=>o.position!==i).map(o=>({...o,position:o.position>i?o.position-1:o.position}));renderPipe()}}},"Remove"):"");
+  box.append(row)});
+ const ob=$("#povr");ob.replaceChildren(...PCUR.overrides.map((o,k)=>{const stSel=h("select",{},...PCUR.stages.map((x,j)=>h("option",{value:j},x.name||"stage "+(j+1))));stSel.value=o.position;stSel.onchange=()=>o.position=parseInt(stSel.value);
+  const chSel=h("select",{},h("option",{value:""},"— coverholder —"),...CHS.filter(c=>c.name).map(c=>h("option",{value:c.name},c.name)));chSel.value=o.coverholder||"";chSel.onchange=()=>o.coverholder=chSel.value;
+  return h("div",{style:"display:flex;gap:.4rem;flex-wrap:wrap;margin:.3rem 0"},"For stage",stSel,"and",chSel,"use",dfSel(o.dataflow_id,v=>{o.dataflow_id=v;o.entity="";renderPipe()}),entSel(o.dataflow_id,o.entity,v=>o.entity=v),h("button",{class:"b",on:{click:()=>{PCUR.overrides.splice(k,1);renderPipe()}}},"Remove"))}))}
+$("#padd").onclick=()=>{const kind=$("#paddkind").value;PCUR.stages.push({name:kind==="merge"?"Merge":"Stage "+(PCUR.stages.length+1),kind,dataflow_id:"",entity:"",output_table:"",input_stage:PCUR.stages.length-1});renderPipe()};
+$("#povradd").onclick=()=>{PCUR.overrides.push({position:0,coverholder:"",dataflow_id:"",entity:""});renderPipe()};
+$("#pname").oninput=()=>PCUR.name=$("#pname").value;
+$("#psave").onclick=async()=>{const m=$("#pmsg2");try{const saved=await api("/api/pipelines/save",{...PCUR,name:$("#pname").value});PCUR=saved;m.textContent="Saved";m.className="ok";PL=await api("/api/pipelines");const s=$("#pselect");s.replaceChildren(h("option",{value:""},"— new pipeline —"),...PL.map(p=>h("option",{value:p.pipeline_id},p.name)));s.value=saved.pipeline_id;renderPipe()}catch(e){m.textContent=e.message;m.className="bad"}};
+$("#pdel").onclick=async()=>{if(!PCUR.pipeline_id||!confirm("Delete this pipeline definition? (Output tables are kept.)"))return;await api("/api/pipelines/delete",{pipeline_id:PCUR.pipeline_id});PCUR=null;initPipeline()};
+$("#prun").onclick=async()=>{if(!PCUR.pipeline_id){$("#prmsg").textContent="Save the pipeline first.";return}
+ const chosen=[...document.querySelectorAll("#chlist input:checked")].map(i=>i.dataset.ch);$("#prmsg").textContent="";
+ try{const{job}=await api("/api/pipelines/run",{pipeline_id:PCUR.pipeline_id,coverholders:chosen,force:$("#pforce").checked,allow_partial_merge:$("#ppartial").checked});
+  const j=await pollJob(job,"#prbar","#prmsg");if(j.status!=="done"){$("#prmsg").textContent=j.error;$("#prmsg").className="bad mono"}else{const r=j.result;$("#prmsg").textContent=`Run ${r.status}`+(r.refreshed_references.length?` · refreshed lookup(s): ${r.refreshed_references.map(x=>x.table).join(", ")}`:"");$("#prmsg").className=(r.status==="ok"?"ok":"warn")+" mono"}
+  refreshStatus()}catch(e){$("#prmsg").textContent=e.message;$("#prmsg").className="bad mono"}};
+const chipCls=s=>s==="loaded"||s==="up_to_date"?"ok":s==="error"?"bad":"warn";
+async function refreshStatus(){const box=$("#pstatus");box.replaceChildren();$("#pdetail").replaceChildren();if(!PCUR||!PCUR.pipeline_id)return;
+ const st=await api("/api/pipelines/status?pipeline_id="+PCUR.pipeline_id);$("#pstime").textContent=st.last_run?`· last run ${st.last_run.started.slice(0,19)} (${st.last_run.status})`:"· never run";
+ if(!st.steps.length){box.append(h("div",{class:"mute"},"Not run yet."));return}
+ const stages=st.pipeline.stages,byCh={};st.steps.forEach(s=>{(byCh[s.coverholder]=byCh[s.coverholder]||{})[s.position]=s});
+ const rows=Object.keys(byCh).sort((a,b)=>(a===""?1:0)-(b===""?1:0)||a.localeCompare(b)).map(ch=>[ch||h("span",{class:"mute"},"all (merge)"),...stages.map(g=>{const s=(byCh[ch]||{})[g.position];if(!s)return"";
+  const rowsTxt=s.rows!=null?` ${fmt(s.rows)}`:"";return h("span",{class:"chip "+chipCls(s.status),title:s.detail||"",on:{click:()=>showStep(ch,g,s)}},s.status.replace("_"," ")+rowsTxt)})]);
+ box.append(h("div",{class:"scroll"},table(["Coverholder",...stages.map(g=>g.name)],rows)),h("div",{style:"margin-top:.5rem"},"Open output: ",...stages.map(g=>h("button",{class:"b",style:"margin-right:.3rem",on:{click:()=>openTable(g.output_table)}},g.output_table))))}
+function showStep(ch,g,s){const d=$("#pdetail");d.replaceChildren(h("div",{},h("b",{},(ch||"all coverholders")+" · "+g.name+": "),h("span",{class:chipCls(s.status)},s.status)," ",s.detail||""),
+ ...(s.warnings||[]).map(w=>h("div",{class:"warn"},"⚠ "+w)),s.status==="needs_mapping"?h("button",{class:"b",on:{click:()=>gotoMap(PCUR.stages[0])}},"Map the layouts →"):"",
+ s.status==="error"&&g.kind!=="files"?h("button",{class:"b",on:{click:()=>gotoMap(g)}},"Open this dataflow's steps →"):"")}
+async function gotoMap(stage){document.querySelector("nav button[data-t=map]").click();await new Promise(r=>setTimeout(r,300));if(!stage.dataflow_id)return;$("#mdf").value=stage.dataflow_id;fillEnt();await new Promise(r=>setTimeout(r,100));$("#ment").value=stage.entity;loadMap()}
+function openTable(tbl){document.querySelector("nav button[data-t=sql]").click();$("#sqltext").value=`SELECT * FROM "${tbl}" LIMIT 100`;$("#run").click()}
 // ---------- boot
 (async()=>{const s=await refreshState();await fb.go(s.home);loadLayouts()})();
 </script></body></html>

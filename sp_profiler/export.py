@@ -18,7 +18,8 @@ from .bulk import qi
 
 EXPORT_DDL = """CREATE TABLE IF NOT EXISTS export_log (
     export_id VARCHAR, table_name VARCHAR, exported_utc TIMESTAMPTZ, mode VARCHAR, rows BIGINT, watermark TIMESTAMPTZ);"""
-SNAPSHOT_TABLES = ["files", "sheets", "sheet_headers", "layouts", "load_log", "runs", "dataflow_attributes", "column_mappings"]
+SNAPSHOT_TABLES = ["files", "sheets", "sheet_headers", "layouts", "load_log", "runs", "dataflow_attributes", "column_mappings",
+                   "pipeline_runs", "pipeline_run_steps"]
 BAD_CHARS = re.compile(r"[ ,;{}()\n\t=\"'`]+")
 
 
@@ -72,16 +73,25 @@ def entity_tables(con) -> dict[str, list[str]]:
     """df_ table name -> entity names that load into it."""
     from .mapping_load import table_for
     out: dict[str, list[str]] = {}
+    in_pipeline: set[str] = set()
+    # a pipeline's first stage may write to a table of its own choosing: that table holds the loaded entities' rows
+    for table, ent in con.execute("SELECT output_table, entity FROM pipeline_stages WHERE kind = 'files' UNION "
+                                  "SELECT s.output_table, o.entity FROM pipeline_stages s JOIN pipeline_overrides o "
+                                  "USING (pipeline_id, position) WHERE s.kind = 'files'").fetchall():
+        out.setdefault(table, []).append(ent)
+        in_pipeline.add(ent)
     for (ent,) in con.execute("SELECT DISTINCT entity FROM load_log").fetchall():
-        out.setdefault(table_for(con, ent), []).append(ent)
+        if ent not in in_pipeline:
+            out.setdefault(table_for(con, ent), []).append(ent)
     return out
 
 
 def default_tables(con) -> list[str]:
     have = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' "
                                       "AND table_type = 'BASE TABLE'").fetchall()}
-    dfs = sorted(t for t in have if t.startswith("df_"))
-    return dfs + [t for t in SNAPSHOT_TABLES if t in have]
+    piped = {r[0] for r in con.execute("SELECT output_table FROM pipeline_stages").fetchall()}
+    data = sorted({t for t in have if t.startswith("df_")} | (piped & have))      # entity tables + every pipeline output
+    return data + [t for t in SNAPSHOT_TABLES if t in have]
 
 
 def export_databricks(con, out_dir: str | Path, tables: Optional[list[str]] = None, incremental: bool = False,
@@ -115,7 +125,7 @@ def export_databricks(con, out_dir: str | Path, tables: Optional[list[str]] = No
             sel.append(e)
             st = spark_type("VARCHAR" if t.upper() in ("TIME", "JSON", "UUID") else "TIMESTAMP" if t.upper() == "TIMESTAMP" else t)
             ddl_cols.append((a, st))
-        is_entity = table.startswith("df_") and table in ent_map
+        is_entity = table in ent_map
         where, watermark = "", None
         if incremental and is_entity:
             ents = ent_map[table]

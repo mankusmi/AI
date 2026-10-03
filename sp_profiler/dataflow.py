@@ -22,13 +22,28 @@ CREATE TABLE IF NOT EXISTS dataflow_queries (
 CREATE TABLE IF NOT EXISTS column_mappings (
     entity VARCHAR, layout_hash VARCHAR, norm_header VARCHAR, attribute VARCHAR, kind VARCHAR DEFAULT 'attribute',
     updated_utc TIMESTAMPTZ DEFAULT now(), PRIMARY KEY (entity, layout_hash, norm_header, kind));
+-- settings are per (dataflow, entity): several dataflows in a pipeline may use the same entity name
 CREATE TABLE IF NOT EXISTS entity_transforms (
-    entity VARCHAR PRIMARY KEY, dataflow_id VARCHAR, use_m BOOLEAN, override_sql VARCHAR,
+    dataflow_id VARCHAR, entity VARCHAR, use_m BOOLEAN, override_sql VARCHAR,
     accept_partial BOOLEAN DEFAULT FALSE, extra_inputs VARCHAR[], updated_utc TIMESTAMPTZ DEFAULT now(),
-    date_order VARCHAR DEFAULT 'auto');
+    date_order VARCHAR DEFAULT 'auto', PRIMARY KEY (dataflow_id, entity));
+-- lookup bindings: coverholder '' applies to everyone, a named coverholder overrides it
 CREATE TABLE IF NOT EXISTS query_bindings (
-    dataflow_id VARCHAR, query_name VARCHAR, table_name VARCHAR, PRIMARY KEY (dataflow_id, query_name));
+    dataflow_id VARCHAR, query_name VARCHAR, table_name VARCHAR, coverholder VARCHAR DEFAULT '',
+    PRIMARY KEY (dataflow_id, query_name, coverholder));
+-- layouts that are not bordereaux (e.g. the mapping workbook sitting in a coverholder folder)
+CREATE TABLE IF NOT EXISTS layout_ignores (entity VARCHAR, layout_hash VARCHAR, PRIMARY KEY (entity, layout_hash));
+-- lookup files imported as tables, remembered so a changed source file can refresh them
+CREATE TABLE IF NOT EXISTS reference_tables (
+    table_name VARCHAR PRIMARY KEY, source_id VARCHAR, source_path VARCHAR, sheet VARCHAR, sha256 VARCHAR,
+    imported_utc TIMESTAMPTZ DEFAULT now());
 """
+
+
+def _pk(con, table: str):
+    r = con.execute("SELECT constraint_column_names FROM duckdb_constraints() WHERE table_name = ? "
+                    "AND constraint_type = 'PRIMARY KEY'", [table]).fetchone()
+    return list(r[0]) if r else None
 
 
 def migrate(con) -> None:
@@ -37,6 +52,19 @@ def migrate(con) -> None:
                                     "WHERE table_name = 'entity_transforms'").fetchall()]
     if et and "date_order" not in et:
         con.execute("ALTER TABLE entity_transforms ADD COLUMN date_order VARCHAR DEFAULT 'auto'")
+    if et and _pk(con, "entity_transforms") == ["entity"]:          # key became (dataflow_id, entity)
+        con.execute("ALTER TABLE entity_transforms RENAME TO entity_transforms_old")
+        con.execute(DATAFLOW_DDL)
+        con.execute("INSERT INTO entity_transforms (dataflow_id, entity, use_m, override_sql, accept_partial, extra_inputs, "
+                    "updated_utc, date_order) SELECT coalesce(dataflow_id, ''), entity, use_m, override_sql, accept_partial, "
+                    "extra_inputs, updated_utc, date_order FROM entity_transforms_old")
+        con.execute("DROP TABLE entity_transforms_old")
+    if _pk(con, "query_bindings") == ["dataflow_id", "query_name"]:    # gained the coverholder column
+        con.execute("ALTER TABLE query_bindings RENAME TO query_bindings_old")
+        con.execute(DATAFLOW_DDL)
+        con.execute("INSERT INTO query_bindings (dataflow_id, query_name, table_name, coverholder) "
+                    "SELECT dataflow_id, query_name, table_name, '' FROM query_bindings_old")
+        con.execute("DROP TABLE query_bindings_old")
     cols = [r[0] for r in con.execute("SELECT column_name FROM information_schema.columns "
                                       "WHERE table_name = 'column_mappings'").fetchall()]
     if cols and "kind" not in cols:
@@ -131,12 +159,13 @@ def _carry_forward(con, new_id: str, name: str) -> dict:
     if not prev:
         return {"from": None, "bindings": 0, "settings": 0}
     old = prev[0]
-    b = con.execute("INSERT INTO query_bindings SELECT ?, query_name, table_name FROM query_bindings WHERE dataflow_id = ? "
-                    "AND query_name IN (SELECT name FROM dataflow_queries WHERE dataflow_id = ?) RETURNING 1",
-                    [new_id, old, new_id]).fetchall()
-    s = con.execute("UPDATE entity_transforms SET dataflow_id = ? WHERE dataflow_id = ? "
-                    "AND entity IN (SELECT entity FROM dataflow_entities WHERE dataflow_id = ?) RETURNING 1",
-                    [new_id, old, new_id]).fetchall()
+    b = con.execute("INSERT INTO query_bindings SELECT ?, query_name, table_name, coverholder FROM query_bindings "
+                    "WHERE dataflow_id = ? AND query_name IN (SELECT name FROM dataflow_queries WHERE dataflow_id = ?) "
+                    "RETURNING 1", [new_id, old, new_id]).fetchall()
+    s = con.execute("INSERT INTO entity_transforms (dataflow_id, entity, use_m, override_sql, accept_partial, extra_inputs, "
+                    "date_order) SELECT ?, entity, use_m, override_sql, accept_partial, extra_inputs, date_order "
+                    "FROM entity_transforms WHERE dataflow_id = ? AND entity IN "
+                    "(SELECT entity FROM dataflow_entities WHERE dataflow_id = ?) RETURNING 1", [new_id, old, new_id]).fetchall()
     return {"from": old, "bindings": len(b), "settings": len(s)}
 
 
