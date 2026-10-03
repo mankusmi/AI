@@ -59,3 +59,29 @@ Everything runs on your machine. The only network traffic is to Microsoft
 telemetry and makes no calls to Anthropic or any other service. `local` mode uses no network at all.
 The DuckDB file contains your file contents and the token cache holds a refresh token: keep both out of git
 (`*.duckdb` is git-ignored) and treat them as confidential.
+
+## Browser UI
+
+```bash
+sp-profile serve --db profile.duckdb      # prints http://127.0.0.1:8765/?t=<token> and opens it
+```
+
+1. **Sources** – browse folders/files on this computer (OneDrive-synced SharePoint works), tick files or profile a whole
+   folder, or profile a SharePoint folder (browser sign-in). Results land in the same DuckDB.
+2. **Dataflow** – import a Power BI **Gen1 dataflow** `model.json` (file dialog or picker). Entities, attributes, data types
+   and the Power Query (M) source are stored in `dataflows`, `dataflow_entities`, `dataflow_attributes`.
+3. **Map & load** – per detected layout, map source columns to the entity's attributes (name-similarity suggestions,
+   incl. `Policy No` ≈ `PolicyNumber`, reordered words and common abbreviations). Mappings are stored per layout in
+   `column_mappings`, so every file sharing that layout is covered. **Load** appends rows from the stored file bytes into a
+   typed table `df_<entity>` (dataflow types → DuckDB types; day-first date parsing; Excel serial dates; `1,200.50`/`(5)` numbers).
+   Unconvertible cells become NULL and are named in `_coerce_errors`. Provenance columns: `_load_id`, `_source_path`,
+   `_source_sha256`, `_sheet`, `_excel_row`, `_layout_hash`, `_loaded_utc`. The same content + sheet is never loaded twice
+   unless "force reload" is ticked; every sheet load is recorded in `load_log`. New attributes in a re-imported dataflow
+   are added to the table with `ALTER TABLE`.
+4. **Query & profile** – SQL editor over the whole database (tables/views sidebar, Ctrl+Enter, CSV download). Only
+   one SELECT/DESCRIBE/SHOW/SUMMARIZE/EXPLAIN statement runs unless "allow changes" is ticked. **Profile result** gives per-column
+   null %, distinct count, min/max, mean/std/quartiles, string lengths and top values for any query or table.
+
+Security: the server listens on 127.0.0.1 only, every API call needs the per-run token and a localhost `Host` header, and
+the page loads no external scripts, fonts or images.
+Only Gen1 `model.json` is parsed; mapping is by column name/layout, M-query transformations are shown but not executed.

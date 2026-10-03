@@ -23,5 +23,8 @@ sp-profile = "sp_profiler.cli:main"
 [tool.setuptools.packages.find]
 include = ["pbi_profiler*", "sp_profiler*"]
 
+[tool.setuptools.package-data]
+sp_profiler = ["web/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

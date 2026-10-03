@@ -46,12 +46,21 @@ def main(argv=None) -> int:
     g.add_argument("--logout", action="store_true", help="delete the cached sign-in and exit")
     common(g)
 
+    sv = sub.add_parser("serve", help="local browser UI (127.0.0.1 only)")
+    sv.add_argument("--db", default="sp_profile.duckdb")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--no-browser", action="store_true", help="do not open the browser automatically")
+
     ex = sub.add_parser("export", help="write a stored file's bytes back out of DuckDB")
     ex.add_argument("--db", default="sp_profile.duckdb")
     ex.add_argument("--rel-path", required=True)
     ex.add_argument("--dest", default=".")
 
     a = p.parse_args(argv)
+    if a.source == "serve":
+        from .webapp import serve
+        serve(a.db, a.port, not a.no_browser)
+        return 0
     if a.source == "export":
         con = open_db(a.db)
         print(export_file(con, a.rel_path, a.dest))

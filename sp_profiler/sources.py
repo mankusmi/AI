@@ -81,6 +81,25 @@ class LocalSource:
                 )
 
 
+class FileListSource:
+    """Explicit list of local files (e.g. ticked in the browser UI)."""
+
+    def __init__(self, paths: list[str | Path]):
+        self.paths = [Path(p).expanduser().resolve() for p in paths]
+        if not self.paths:
+            raise ValueError("No files given")
+        parents = {str(p.parent) for p in self.paths}
+        self.root = Path(os.path.commonpath(parents))
+
+    def iter_files(self) -> Iterator[FileEntry]:
+        for full in sorted(self.paths):
+            st = full.stat()
+            yield FileEntry(
+                rel_path=full.relative_to(self.root).as_posix(), name=full.name, size_bytes=st.st_size,
+                modified=_iso(st.st_mtime), created=_iso(st.st_ctime), location=str(full),
+                _materialize=lambda p=full: contextlib.nullcontext(p))
+
+
 # --------------------------------------------------------------------------- graph
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = ["Files.Read.All", "Sites.Read.All"]

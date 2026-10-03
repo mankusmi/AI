@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SP Profiler</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#1d2330;--mute:#667085;--line:#d9dde5;--acc:#2f6fed;--acc2:#e8efff;--ok:#16794c;--bad:#b42318;--warn:#a15c07}
+@media (prefers-color-scheme:dark){:root{--bg:#14171d;--panel:#1c2029;--ink:#e6e9ef;--mute:#98a1b3;--line:#2d3340;--acc:#6b9bff;--acc2:#22304f;--ok:#4cc38a;--bad:#ff7b72;--warn:#e3b341}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
+header{display:flex;align-items:center;gap:1rem;padding:.6rem 1rem;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{font-size:1rem;margin:0}header small{color:var(--mute)}
+nav{display:flex;gap:.25rem;margin-left:auto}nav button{border:0;background:none;color:var(--mute);padding:.45rem .8rem;border-radius:6px;cursor:pointer;font:inherit}
+nav button.on{background:var(--acc2);color:var(--acc);font-weight:600}
+main{padding:1rem;max-width:1400px;margin:auto}section{display:none}section.on{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:1rem;margin-bottom:1rem}
+.row{display:flex;gap:1rem;flex-wrap:wrap}.row>*{flex:1 1 320px;min-width:0}
+h2{font-size:.95rem;margin:0 0 .6rem}
+button.b,select,input,textarea{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:.35rem .6rem}
+button.b{cursor:pointer}button.b.p{background:var(--acc);border-color:var(--acc);color:#fff}button.b:disabled{opacity:.5;cursor:default}
+input[type=text]{width:100%}textarea{width:100%;font:13px ui-monospace,Consolas,monospace}
+table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--line);padding:3px 8px;text-align:left;vertical-align:top;white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflow:auto;max-height:60vh;border:1px solid var(--line);border-radius:6px}
+.fs li{list-style:none;padding:2px 6px;cursor:pointer;display:flex;gap:.5rem;align-items:center;border-radius:4px}.fs li:hover{background:var(--acc2)}.fs{margin:0;padding:0}
+.mute{color:var(--mute)}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.mono{font-family:ui-monospace,Consolas,monospace}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;min-width:80px}.bar i{display:block;height:100%;background:var(--acc)}
+.bar.n i{background:var(--bad)}.pill{display:inline-block;padding:0 .5rem;border-radius:99px;background:var(--acc2);color:var(--acc);font-size:12px}
+.prog{height:10px;background:var(--line);border-radius:5px;overflow:hidden}.prog i{display:block;height:100%;background:var(--acc);transition:width .2s}
+.side{max-height:60vh;overflow:auto}.side div{cursor:pointer;padding:1px 4px}.side div:hover{background:var(--acc2)}
+</style></head><body>
+<header><h1>SP Profiler</h1><small id="state"></small>
+<nav><button data-t="src" class="on">1 · Sources</button><button data-t="df">2 · Dataflow</button><button data-t="map">3 · Map &amp; load</button><button data-t="sql">4 · Query &amp; profile</button></nav></header>
+<main>
+<section id="src" class="on">
+ <div class="row"><div class="card"><h2>Pick a folder or files (this computer)</h2>
+  <div style="display:flex;gap:.4rem;margin-bottom:.5rem"><input type="text" id="fspath"><button class="b" id="fsgo">Go</button><label class="mute"><input type="checkbox" id="fsall"> all files</label></div>
+  <div id="fsroots" class="mute" style="margin-bottom:.4rem"></div>
+  <div class="scroll"><ul class="fs" id="fslist"></ul></div>
+  <div style="margin-top:.6rem;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+   <button class="b p" id="pfolder">Profile this folder (recursive)</button><button class="b" id="pfiles">Profile ticked files</button>
+   <label class="mute"><input type="checkbox" id="store" checked> keep file bytes in DuckDB</label></div></div>
+ <div class="card"><h2>or SharePoint (opens browser sign-in)</h2>
+  <input type="text" id="spurl" placeholder="https://contoso.sharepoint.com/sites/Claims" style="margin-bottom:.4rem">
+  <div style="display:flex;gap:.4rem;margin-bottom:.5rem"><input type="text" id="splib" value="Documents"><input type="text" id="spfolder" placeholder="folder inside library (optional)"></div>
+  <button class="b p" id="psp">Profile SharePoint folder</button>
+  <h2 style="margin-top:1rem">Progress</h2><div class="prog"><i id="pbar" style="width:0"></i></div><div id="pmsg" class="mute mono" style="margin-top:.4rem;word-break:break-all"></div><div id="pres"></div></div></div>
+ <div class="card"><h2>Layouts found</h2><div id="layouts" class="scroll"></div></div>
+</section>
+<section id="df">
+ <div class="row"><div class="card"><h2>Import a Power BI Gen1 dataflow (<span class="mono">model.json</span>)</h2>
+  <p class="mute">Pick the exported JSON from the folder browser below, or choose it with the file dialog. Re-importing the same file is a no-op.</p>
+  <input type="file" id="dffile" accept=".json"> <button class="b" id="dfbrowse">…or pick on this computer</button>
+  <div id="dfmsg" style="margin-top:.5rem"></div>
+  <div id="dffs" style="display:none;margin-top:.5rem"><div class="mono mute" id="dffspath"></div><div class="scroll"><ul class="fs" id="dffslist"></ul></div></div></div>
+ <div class="card"><h2>Imported dataflows</h2><div id="dflist"></div></div></div>
+</section>
+<section id="map">
+ <div class="card"><div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center"><b>Dataflow / entity</b><select id="mdf"></select><select id="ment"></select>
+  <span class="mute" id="mtable"></span></div></div>
+ <div id="mlayouts"></div>
+ <div class="card"><h2>Append mapped rows to DuckDB</h2><p class="mute">Loads every stored sheet whose layout has a saved mapping and that hasn't been loaded yet (same content + sheet is never loaded twice unless forced).</p>
+  <button class="b p" id="mload">Load / append now</button> <label class="mute"><input type="checkbox" id="mforce"> force reload</label>
+  <div class="prog" style="margin:.6rem 0"><i id="lbar" style="width:0"></i></div><div id="lmsg" class="mono mute"></div><div id="lres"></div>
+  <h2 style="margin-top:1rem">Load log</h2><div id="loglist" class="scroll"></div></div>
+</section>
+<section id="sql">
+ <div class="row" style="flex-wrap:nowrap"><div class="card" style="flex:0 0 260px"><h2>Tables &amp; views</h2><div class="side" id="schema"></div></div>
+ <div style="flex:1;min-width:0"><div class="card"><textarea id="sqltext" rows="6" spellcheck="false">SELECT * FROM v_files LIMIT 100</textarea>
+  <div style="margin-top:.5rem;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+  <button class="b p" id="run">Run (Ctrl+Enter)</button><button class="b" id="prof">Profile result</button><button class="b" id="csv">Download CSV</button>
+  <label class="mute"><input type="checkbox" id="allow"> allow changes (CREATE/INSERT/…)</label><span id="sqlmsg" class="mute"></span></div></div>
+ <div class="card"><div id="result" class="scroll"></div></div><div class="card" id="profcard" style="display:none"><h2 id="proftitle">Profile</h2><div id="profile" class="scroll"></div></div></div></div>
+</section>
+</main>
+<script>
+const TOKEN="__TOKEN__";
+const $=s=>document.querySelector(s);
+function h(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(k==="on")for(const[ev,f]of Object.entries(v))e.addEventListener(ev,f);else if(k==="class")e.className=v;else if(v!==false&&v!=null)e.setAttribute(k,v===true?"":v)}
+ for(const c of kids.flat())if(c!=null&&c!==false)e.append(c.nodeType?c:document.createTextNode(String(c)));return e}
+async function api(path,body){const r=await fetch(path,{method:body?"POST":"GET",headers:{"X-Token":TOKEN,"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});
+ const j=await r.json().catch(()=>({error:"bad response"}));if(!r.ok)throw new Error(j.error||r.statusText);return j}
+const fmt=n=>n==null?"":typeof n==="number"?(Number.isInteger(n)?n.toLocaleString():n.toLocaleString(undefined,{maximumFractionDigits:4})):String(n);
+const size=b=>b==null?"":b<1024?b+" B":b<1048576?(b/1024).toFixed(1)+" KB":(b/1048576).toFixed(1)+" MB";
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{document.querySelectorAll("nav button,section").forEach(x=>x.classList.remove("on"));b.classList.add("on");$("#"+b.dataset.t).classList.add("on");
+ ({src:loadLayouts,df:loadDataflows,map:initMap,sql:loadSchema})[b.dataset.t]()});
+async function refreshState(){const s=await api("/api/state");$("#state").textContent=`${s.db} · ${s.files} files · ${s.layouts} layouts · ${s.dataflows} dataflows`;return s}
+async function pollJob(id,bar,msg,done){for(;;){const j=await api("/api/jobs/"+id);const pct=j.total?100*j.done/j.total:(j.status==="done"?100:0);
+ $(bar).style.width=(j.total?pct:Math.min(95,j.done*2))+"%";$(msg).textContent=j.status==="running"?`${j.done}${j.total?"/"+j.total:""}  ${j.message}`:"";
+ if(j.status!=="running"){$(bar).style.width="100%";return j}await new Promise(r=>setTimeout(r,500))}}
+// ---------- file browser
+function fsBrowser(listSel,pathSel,{onFile,ticks}){let cur="";
+ async function go(p){const all=$("#fsall")?.checked?"1":"";const d=await api("/api/fs?path="+encodeURIComponent(p||"")+"&all="+all);cur=d.path;{const pe=$(pathSel);pe.tagName==="INPUT"?pe.value=d.path:pe.textContent=d.path}
+  const ul=$(listSel);ul.replaceChildren();if(d.parent)ul.append(h("li",{on:{click:()=>go(d.parent)}},"📁 .."));
+  for(const e of d.entries){const full=d.path.replace(/[\\/]$/,"")+(d.path.includes("\\")?"\\":"/")+e.name;
+   ul.append(h("li",{on:{click:ev=>{if(ev.target.type==="checkbox")return;e.dir?go(full):onFile&&onFile(full)}}},
+    ticks&&!e.dir?h("input",{type:"checkbox","data-p":full}):null,e.dir?"📁":"📄",e.name,h("span",{class:"mute"},e.dir?"":size(e.size))))}
+  return d}
+ return{go,cur:()=>cur}}
+const fb=fsBrowser("#fslist","#fspath",{ticks:true});
+$("#fsgo").onclick=()=>fb.go($("#fspath").value);$("#fsall").onchange=()=>fb.go(fb.cur());
+async function startProfile(body){body.store_content=$("#store").checked;$("#pres").textContent="";
+ try{const{job}=await api("/api/profile/start",body);const j=await pollJob(job,"#pbar","#pmsg");
+ $("#pres").replaceChildren(j.status==="done"?h("div",{class:"ok"},"Done: "+JSON.stringify(j.result.summary)):h("div",{class:"bad"},j.error));refreshState();loadLayouts()}catch(e){$("#pres").replaceChildren(h("div",{class:"bad"},e.message))}}
+$("#pfolder").onclick=()=>startProfile({folder:fb.cur()});
+$("#pfiles").onclick=()=>{const files=[...document.querySelectorAll("#fslist input:checked")].map(i=>i.dataset.p);files.length?startProfile({files}):alert("Tick some files first")};
+$("#psp").onclick=()=>startProfile({sharepoint:{site_url:$("#spurl").value.trim(),library:$("#splib").value.trim()||"Documents",folder:$("#spfolder").value.trim()}});
+function table(cols,rows){return h("table",{},h("thead",{},h("tr",{},cols.map(c=>h("th",{},c)))),h("tbody",{},rows.map(r=>h("tr",{},r.map(c=>h("td",{},c==null?h("span",{class:"mute"},"∅"):c))))))}
+async function loadLayouts(){const l=await api("/api/layouts");$("#layouts").replaceChildren(l.length?table(["Layout","Files","Sheets","Cols","Headers","Example"],l.map(x=>[x.layout_hash,x.files,x.sheets,x.norm_headers.length,x.headers.join(" | "),x.example])):h("div",{class:"mute",style:"padding:.5rem"},"Nothing profiled yet."))}
+// ---------- dataflow
+async function importDf(body){try{const r=await api("/api/dataflow/import",body);$("#dfmsg").replaceChildren(h("span",{class:"ok"},(r.new?"Imported ":"Already imported ")+r.name+": "+r.entities.map(e=>`${e.name} (${e.attributes} cols)`).join(", ")));loadDataflows();refreshState()}catch(e){$("#dfmsg").replaceChildren(h("span",{class:"bad"},e.message))}}
+$("#dffile").onchange=async e=>{const f=e.target.files[0];if(f)importDf({content:await f.text(),filename:f.name})};
+const dfb=fsBrowser("#dffslist","#dffspath",{onFile:p=>/\.json$/i.test(p)&&importDf({path:p})});
+$("#dfbrowse").onclick=()=>{$("#dffs").style.display="block";dfb.go("")};
+async function loadDataflows(){const d=await api("/api/dataflows");$("#dflist").replaceChildren(...(d.length?d:[{}]).map(x=>!x.dataflow_id?h("div",{class:"mute"},"None yet."):h("div",{style:"margin-bottom:1rem"},h("b",{},x.name||"(unnamed)")," ",h("span",{class:"pill mono"},x.dataflow_id),h("span",{class:"mute"}," imported "+x.imported),
+  ...x.entities.map(e=>h("details",{},h("summary",{},e.name," — ",e.attributes.length," attributes → table ",h("span",{class:"mono"},e.table)),table(["#","Attribute","Type"],e.attributes.map((a,i)=>[i+1,a.name,a.type])),e.m_query?h("pre",{class:"mono mute",style:"white-space:pre-wrap"},e.m_query):null)))))}
+// ---------- mapping
+let DF=[];
+async function initMap(){DF=await api("/api/dataflows");const s=$("#mdf");const keep=s.value;s.replaceChildren(...DF.map(d=>h("option",{value:d.dataflow_id},`${d.name||"(unnamed)"} · ${d.dataflow_id}`)));if(keep)s.value=keep;fillEnt();loadLog()}
+function fillEnt(){const d=DF.find(x=>x.dataflow_id===$("#mdf").value);$("#ment").replaceChildren(...(d?d.entities:[]).map(e=>h("option",{value:e.name},e.name)));loadMap()}
+$("#mdf").onchange=fillEnt;$("#ment").onchange=loadMap;
+async function loadMap(){const box=$("#mlayouts");box.replaceChildren();if(!$("#mdf").value||!$("#ment").value){box.append(h("div",{class:"card mute"},"Import a dataflow first."));return}
+ const m=await api(`/api/mapping?dataflow_id=${$("#mdf").value}&entity=${encodeURIComponent($("#ment").value)}`);$("#mtable").textContent="→ table "+m.table;
+ if(!m.layouts.length)box.append(h("div",{class:"card mute"},"Profile some files first (step 1)."));
+ for(const lay of m.layouts){const sels=[];
+  const rows=lay.norm_headers.map((nh,i)=>{const sel=h("select",{"data-h":nh},h("option",{value:""},"— skip —"),...m.attributes.map(a=>h("option",{value:a.name},`${a.name} (${a.type})`)));
+   const sv=lay.saved[nh],sg=lay.suggested[nh];sel.value=sv||(sg?sg.attribute:"");sels.push(sel);
+   return[i+1,lay.headers[i],sv?h("span",{class:"ok"},"saved"):sg?h("span",{class:"warn"},"suggested "+Math.round(sg.score*100)+"%"):"",sel]});
+  const msg=h("span",{class:"mute"});
+  const save=h("button",{class:"b p",on:{click:async()=>{try{const r=await api("/api/mapping/save",{dataflow_id:$("#mdf").value,entity:$("#ment").value,layout_hash:lay.layout_hash,pairs:sels.map(s=>({norm_header:s.dataset.h,attribute:s.value}))});msg.textContent=`Saved ${r.saved} mappings`;msg.className="ok"}catch(e){msg.textContent=e.message;msg.className="bad"}}}},"Save mapping");
+  const unm=m.attributes.filter(a=>!sels.some(s=>s.value===a.name)).length;
+  box.append(h("details",{class:"card",open:(lay.pending||!Object.keys(lay.saved).length)||null},h("summary",{},h("b",{},lay.layout_hash)," · ",lay.files," file(s) · ",lay.norm_headers.length," columns · ",lay.pending?h("span",{class:"warn"},"has unloaded data"):"",Object.keys(lay.saved).length?h("span",{class:"ok"}," · mapped"):h("span",{class:"mute"}," · not mapped yet")),
+   h("div",{class:"scroll",style:"margin:.5rem 0"},table(["#","Source column","Status","→ Target attribute"],rows)),save," ",msg,h("div",{class:"mute"},"Example: "+lay.example)))}}
+$("#mload").onclick=async()=>{$("#lres").replaceChildren();try{const{job}=await api("/api/load/start",{dataflow_id:$("#mdf").value,entity:$("#ment").value,force:$("#mforce").checked});
+ const j=await pollJob(job,"#lbar","#lmsg");$("#lres").replaceChildren(j.status==="done"?h("div",{class:j.result.sheets_failed?"warn":"ok"},`Loaded ${fmt(j.result.rows)} rows from ${j.result.sheets_loaded} sheet(s) into ${j.result.table}; ${j.result.sheets_failed} failed; ${fmt(j.result.coerce_error_cells)} cells couldn't be converted (NULL, see _coerce_errors). Nothing pending? Save a mapping first.`):h("div",{class:"bad"},j.error));loadLog();loadMap()}catch(e){$("#lres").replaceChildren(h("div",{class:"bad"},e.message))}};
+async function loadLog(){const l=await api("/api/loads");$("#loglist").replaceChildren(l.length?table(["When","Entity","File","Sheet","Rows","Empty","Bad cells","Status"],l.map(x=>[x.finished?.slice(0,19),x.entity,x.source_path,x.sheet,fmt(x.rows_loaded),fmt(x.rows_skipped_empty),fmt(x.coerce_error_cells),x.error?x.status+": "+x.error:x.status])):h("div",{class:"mute",style:"padding:.5rem"},"No loads yet."))}
+// ---------- sql + profile
+let last=null;
+async function loadSchema(){const s=await api("/api/schema");$("#schema").replaceChildren(...s.map(t=>h("details",{},h("summary",{},h("span",{on:{click:e=>{e.preventDefault();$("#sqltext").value=`SELECT * FROM "${t.name}" LIMIT 100`}}},(t.kind==="view"?"◇ ":"▦ ")+t.name),t.rows!=null?h("span",{class:"mute"}," "+fmt(t.rows)):""),
+  ...t.columns.map(c=>h("div",{class:"mono",on:{click:()=>{const ta=$("#sqltext");ta.setRangeText('"'+c.name+'"',ta.selectionStart,ta.selectionEnd,"end");ta.focus()}}},c.name+" ",h("span",{class:"mute"},c.type))))))}
+async function runSql(){$("#sqlmsg").textContent="running…";const sql=$("#sqltext").value;const t0=performance.now();
+ try{const r=await api("/api/sql",{sql,allow_write:$("#allow").checked});last=sql;
+  $("#sqlmsg").textContent=(r.message||`${r.rows.length} row(s)${r.truncated?" (truncated to 1000 — use Download CSV for all)":""}`)+` · ${Math.round(performance.now()-t0)} ms`;$("#sqlmsg").className="mute";
+  $("#result").replaceChildren(r.columns.length?table(r.columns,r.rows):h("div",{style:"padding:.5rem"},"OK"));if($("#allow").checked)loadSchema()}
+ catch(e){$("#sqlmsg").textContent=e.message;$("#sqlmsg").className="bad"}}
+$("#run").onclick=runSql;$("#sqltext").addEventListener("keydown",e=>{if(e.ctrlKey&&e.key==="Enter")runSql()});
+$("#csv").onclick=async()=>{const r=await fetch("/api/sql_csv",{method:"POST",headers:{"X-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({sql:$("#sqltext").value})});
+ if(!r.ok)return alert((await r.json()).error);const a=h("a",{href:URL.createObjectURL(await r.blob()),download:"query.csv"});a.click()};
+$("#prof").onclick=async()=>{$("#profcard").style.display="block";$("#profile").replaceChildren(h("div",{style:"padding:.5rem"},"Profiling…"));
+ try{const p=await api("/api/profile-data",{sql:$("#sqltext").value});$("#proftitle").textContent=`Profile · ${fmt(p.rows)} rows · ${p.columns.length} columns`;
+  $("#profile").replaceChildren(table(["Column","Type","Nulls","Distinct","Min","Max","Mean / avg len","Std","Median","Top values"],p.columns.map(c=>c.skipped?[c.name,c.type,"skipped"]:[c.name,c.type,
+   h("div",{},fmt(c.nulls)+" ("+c.null_pct+"%)",h("div",{class:"bar n"},h("i",{style:`width:${c.null_pct}%`}))),fmt(c.distinct)+" ("+c.distinct_pct+"%)",c.min,c.max,c.mean!=null?fmt(c.mean):c.avg_len!=null?fmt(c.avg_len)+" chars":"",c.std!=null?fmt(c.std):"",c.median!=null?fmt(c.median):"",
+   (c.top||[]).map(t=>h("div",{},h("span",{class:"mono"},t.value.length>40?t.value.slice(0,40)+"…":t.value)," ",h("span",{class:"mute"},fmt(t.count)+" · "+t.pct+"%")))])))}
+ catch(e){$("#profile").replaceChildren(h("div",{class:"bad",style:"padding:.5rem"},e.message))}};
+// ---------- boot
+(async()=>{const s=await refreshState();await fb.go(s.home);loadLayouts()})();
+</script></body></html>

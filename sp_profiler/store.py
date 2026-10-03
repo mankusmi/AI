@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
+from .dataflow import DATAFLOW_DDL
+from .mapping_load import LOAD_DDL
 
 DDL = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -76,6 +78,8 @@ def open_db(db_path: str | Path):
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path))
     con.execute(DDL)
+    con.execute(DATAFLOW_DDL)
+    con.execute(LOAD_DDL)
     return con
 
 
