@@ -1,14 +1,12 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:"></head><body>
 <title>Dashboard Sketchpad</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Patrick+Hand&display=swap">
 <style>
 /* Layout: three-column workbench (visual palette | 16:9 report canvas | inspector); collapses to one column on phones */
 :root{
-  --ui:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
-  --hand:'Patrick Hand','Comic Sans MS','Segoe Print',cursive;
+  --ui:system-ui,-apple-system,'Segoe UI',sans-serif;
+  --hand:'Segoe Print','Bradley Hand','Chalkboard SE','Patrick Hand','Comic Sans MS',cursive;
   --bg:#E9ECEF; --panel:#F8F9FA; --panel2:#EEF1F3; --ink:#18222B; --ink2:#55626D; --line:#D1D7DD;
   --accent:#E3A008; --accent-ink:#1A1400; --focus:#2563EB;
   --canvas:#FFFFFF; --grid:#E4E8EC; --wf:#2A3640; --wf2:#6B7883;
@@ -177,6 +175,7 @@ dl.keys{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;margin:8px 0 0;
       <button class="btn sm" id="zIn" aria-label="Zoom in">+</button>
       <span class="sep"></span>
       <button class="btn sm" id="tplBtn">Templates</button>
+      <button class="btn sm" id="openBtn">Open file</button><input type="file" id="openIn" accept=".json,application/json" hidden>
       <button class="btn sm pri" id="expBtn">Export</button>
       <button class="btn sm" id="themeBtn" aria-label="Toggle theme">Theme</button>
     </div>
@@ -611,20 +610,27 @@ $('#expBtn').onclick=()=>{
   const m=modal(`<header><h2>Export</h2><button class="btn sm" data-close>Close</button></header>
   <div class="seg" id="xseg"><button data-x="md" class="on">Spec for developers</button><button data-x="json">Project JSON</button></div>
   <textarea id="xta" spellcheck="false" aria-label="Export text"></textarea>
-  <div class="row" style="margin:0"><button class="btn pri" id="xcopy">Copy</button><button class="btn" id="xload" hidden>Load JSON into project</button></div>`);
+  <div class="row" style="margin:0"><button class="btn pri" id="xcopy">Copy</button><button class="btn" id="xsave">Save as file</button><button class="btn" id="xload" hidden>Load JSON into project</button></div>`);
   const ta=m.querySelector('#xta');let kind='md';
   const fill=()=>{ta.value=kind==='md'?specMD():JSON.stringify(S,null,1);m.querySelector('#xload').hidden=kind!=='json'};fill();
   m.querySelector('#xseg').onclick=e=>{const b=e.target.closest('[data-x]');if(!b)return;kind=b.dataset.x;m.querySelectorAll('#xseg button').forEach(x=>x.classList.toggle('on',x===b));fill()};
   m.querySelector('#xcopy').onclick=()=>copy(ta.value,ta);
-  m.querySelector('#xload').onclick=()=>{try{const d=JSON.parse(ta.value);if(!d.pages||!d.pages.length)throw 0;
-    d.pages.forEach(p=>(p.items||(p.items=[])).forEach((i,k)=>{if(!TYPES[i.type])i.type='shape';i.id=i.id||uid();i.n=i.n||k+1;i.status=ST[i.status]?i.status:'draft';i.fields=i.fields||'';i.note=i.note||'';i.title=i.title||''}));
-    S=d;ci=0;sel=null;snap=JSON.stringify(S);undoS=[];redoS=[];refreshAll();save();syncUndo();m.remove();toast('Project loaded')}catch(e){toast('That JSON is not a valid project')}};
+  m.querySelector('#xsave').onclick=()=>{const md=kind==='md';saveFile((S.name||'wireframe').replace(/[^\w-]+/g,'_')+(md?'.md':'.json'),ta.value,md?'text/markdown':'application/json')};
+  m.querySelector('#xload').onclick=()=>{if(loadProject(ta.value))m.remove()};
 };
 $('#tplBtn').onclick=()=>{
   const m=modal(`<header><h2>Add a template page</h2><button class="btn sm" data-close>Close</button></header>
   <div class="tpls">${Object.keys(TPL).map(k=>{const p=TPL[k].build();return`<button class="tpl" data-tpl="${k}"><div class="pv">${p.items.map(i=>`<i style="left:${i.x/W*100}%;top:${i.y/H*100}%;width:${i.w/W*100}%;height:${i.h/H*100}%;${i.type==='shape'?'opacity:.5':''}"></i>`).join('')}</div><b>${TPL[k].name}</b><span>${TPL[k].desc}</span></button>`}).join('')}</div>`);
   m.addEventListener('click',e=>{const b=e.target.closest('[data-tpl]');if(!b)return;S.pages.push(TPL[b.dataset.tpl].build());ci=S.pages.length-1;sel=null;refreshAll();commit();m.remove()});
 };
+
+
+function loadProject(text){try{const d=JSON.parse(text);if(!d.pages||!d.pages.length)throw 0;
+  d.pages.forEach(p=>(p.items||(p.items=[])).forEach((i,k)=>{if(!TYPES[i.type])i.type='shape';i.id=i.id||uid();i.n=i.n||k+1;i.status=ST[i.status]?i.status:'draft';i.fields=i.fields||'';i.note=i.note||'';i.title=i.title||''}));
+  S=d;ci=0;sel=null;snap=JSON.stringify(S);undoS=[];redoS=[];refreshAll();save();syncUndo();toast('Project loaded');return true}catch(e){toast('That file is not a valid project');return false}}
+function saveFile(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+$('#openBtn').onclick=()=>$('#openIn').click();
+$('#openIn').onchange=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>loadProject(r.result);r.readAsText(f);e.target.value=''};
 
 /* ---------- boot ---------- */
 function refreshAll(){$('#projName').value=S.name;renderPages();renderLeft();renderCanvas();renderRight();applyScale()}
