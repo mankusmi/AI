@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .m2sql import Pipeline, Translator, describe_final, register_udfs
-from .mapping_load import date_order_for_culture, target_table
+from .m2sql import Pipeline, Translator, register_udfs
+from .store import read_blob
+from .mapping_load import date_order_for_culture, table_for
 
 
 def dataflow_queries(con, dataflow_id: str) -> dict[str, str]:
@@ -19,7 +20,7 @@ def entity_tables(con, dataflow_id: str) -> dict[str, str]:
     """Entities of this dataflow that already have a loaded ``df_`` table (usable as lookup sources)."""
     out = {}
     for (ent,) in con.execute("SELECT entity FROM dataflow_entities WHERE dataflow_id = ?", [dataflow_id]).fetchall():
-        tbl = target_table(ent)
+        tbl = table_for(con, ent)
         if con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [tbl]).fetchone():
             out[ent] = tbl
     return out
@@ -61,13 +62,13 @@ def resolve(con, dataflow_id: str, entity: str) -> dict:
     """Decide what a load will run: {mode: 'm'|'attribute', sql, inputs, status, pipeline, ...}."""
     p = translate(con, dataflow_id, entity)
     st = settings(con, entity)
-    has_m = bool(p.steps) or bool(p.error)
     use = (st["use_m"] if st else p.complete)            # no explicit choice: auto-on only if fully translated
     extra = (st or {}).get("extra_inputs", [])
     order, culture, order_src = date_order(con, dataflow_id, entity)
     out = {"pipeline": p, "settings": st, "translated": p.complete, "use_m": bool(use), "mode": "attribute",
            "date_order": order, "culture": culture, "date_order_source": order_src,
-           "sql": None, "inputs": [], "status": "disabled", "generated_sql": p.sql() if len(p.ctes) > 1 else ""}
+           "sql": None, "inputs": [], "status": "disabled", "generated_sql": p.sql() if len(p.ctes) > 1 else "",
+           "dynamic_columns": p.dynamic_columns}
     if not use:
         return out
     inputs = list(dict.fromkeys(p.inputs + extra))
@@ -91,31 +92,26 @@ def output_columns(cur, plan: dict) -> list[tuple[str, str]]:
 
 def stage_sample(con, plan: dict, entity: str, layout_hash: str, sample_rows: int = 500) -> int:
     """Stage the first rows of the first stored sheet with this layout (input mapping applied). Returns row count."""
-    from .m2sql import stage_table, stage_value
-    from .mapping_load import _norm_header_cells, _sheet_rows, pending_sheets
+    from .m2sql import sheet_columns, stage_table, stage_value
+    from .mapping_load import _norm_header_cells, _sheet_rows
     row = con.execute("""SELECT f.sha256, s.sheet, s.header_row FROM sheets s JOIN files f USING (run_id, rel_path)
                          JOIN file_blobs b ON b.sha256 = f.sha256
                          WHERE s.layout_hash = ? AND s.header_row IS NOT NULL LIMIT 1""", [layout_hash]).fetchone()
     if not row:
         raise LookupError("No stored file with that layout (was it profiled with 'keep file bytes'?)")
-    inputs = plan["inputs"]
     mapping = dict(con.execute("SELECT norm_header, attribute FROM column_mappings WHERE entity = ? AND layout_hash = ? "
                                "AND kind = 'input'", [entity, layout_hash]).fetchall())
-    blob = bytes(con.execute("SELECT content FROM file_blobs WHERE sha256 = ?", [row[0]]).fetchone()[0])
-    header, rows = _sheet_rows(blob, row[1], row[2])
-    col_for = {}
-    for i, h in enumerate(_norm_header_cells(header)):
-        if h in mapping and mapping[h] in inputs and mapping[h] not in col_for:
-            col_for[mapping[h]] = i
+    header, rows = _sheet_rows(read_blob(con, row[0]), row[1], row[2])
+    cols = sheet_columns(header, plan["inputs"], mapping, _norm_header_cells(header), plan.get("dynamic_columns", False))
     staged = []
     for k, r in rows:
-        vals = [stage_value(r[col_for[c]]) if c in col_for and col_for[c] < len(r) else None for c in inputs]
+        vals = [stage_value(r[i]) if i is not None and i < len(r) else None for _, i in cols]
         if all(v is None or not v.strip() for v in vals):
             continue
         staged.append((k, *vals))
         if len(staged) >= sample_rows:
             break
-    stage_table(con, inputs, staged)
+    stage_table(con, [n for n, _ in cols], staged)
     return len(staged)
 
 

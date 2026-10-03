@@ -13,7 +13,10 @@ LOAD_DDL = """
 CREATE TABLE IF NOT EXISTS load_log (
     load_id VARCHAR, entity VARCHAR, dataflow_id VARCHAR, started_utc TIMESTAMPTZ, finished_utc TIMESTAMPTZ,
     source_sha256 VARCHAR, source_path VARCHAR, sheet VARCHAR, layout_hash VARCHAR,
-    rows_loaded BIGINT, rows_skipped_empty BIGINT, coerce_error_cells BIGINT, status VARCHAR, error VARCHAR);
+    rows_loaded BIGINT, rows_skipped_empty BIGINT, coerce_error_cells BIGINT, status VARCHAR, error VARCHAR,
+    source_id VARCHAR);
+-- entity name -> DuckDB table name, unique even when two entity names slug to the same text
+CREATE TABLE IF NOT EXISTS entity_tables (entity VARCHAR PRIMARY KEY, table_name VARCHAR UNIQUE);
 """
 
 DUCK_TYPES = {
@@ -24,7 +27,7 @@ DUCK_TYPES = {
 }
 PROVENANCE = [("_load_id", "VARCHAR"), ("_source_path", "VARCHAR"), ("_source_sha256", "VARCHAR"),
               ("_sheet", "VARCHAR"), ("_excel_row", "INTEGER"), ("_layout_hash", "VARCHAR"),
-              ("_loaded_utc", "TIMESTAMPTZ"), ("_coerce_errors", "VARCHAR")]
+              ("_loaded_utc", "TIMESTAMPTZ"), ("_coerce_errors", "VARCHAR"), ("_source_id", "VARCHAR")]
 DMY_FORMATS = ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m-%y")
 MDY_FORMATS = ("%m/%d/%Y", "%m-%d-%Y", "%m.%d.%Y", "%m/%d/%y", "%m-%d-%y")
 OTHER_FORMATS = ("%Y/%m/%d", "%d %b %Y", "%d-%b-%Y", "%d %B %Y")
@@ -55,20 +58,70 @@ def duck_type(data_type: str) -> str:
     return DUCK_TYPES.get(str(data_type).lower(), "VARCHAR")
 
 
+def table_for(con, entity: str) -> str:
+    """The DuckDB table an entity loads into. Names are registered, so "A B" and "A-B" never share a table."""
+    r = con.execute("SELECT table_name FROM entity_tables WHERE entity = ?", [entity]).fetchone()
+    if r:
+        return r[0]
+    base = target_table(entity)
+    used = {x[0] for x in con.execute("SELECT table_name FROM entity_tables").fetchall()}
+    name, n = base, 2
+    while name in used:
+        name, n = f"{base}_{n}", n + 1
+    try:
+        con.execute("INSERT INTO entity_tables VALUES (?, ?)", [entity, name])
+    except Exception:                       # registered concurrently by another thread
+        r = con.execute("SELECT table_name FROM entity_tables WHERE entity = ?", [entity]).fetchone()
+        if r:
+            return r[0]
+        raise
+    return name
+
+
+def attribute_problems(attributes: list[dict]) -> list[str]:
+    """Reasons a set of dataflow attributes cannot become DuckDB columns."""
+    problems, seen = [], {}
+    reserved = {p[0].lower() for p in PROVENANCE}
+    for a in attributes:
+        low = a["name"].lower()
+        if low in seen:
+            problems.append(f"attributes {seen[low]!r} and {a['name']!r} differ only by case (DuckDB columns are case-insensitive)")
+        seen.setdefault(low, a["name"])
+        if low in reserved:
+            problems.append(f"attribute {a['name']!r} clashes with a provenance column; rename it in the dataflow")
+    return problems
+
+
 def ensure_target_table(con, entity: str, attributes: list[dict]) -> str:
-    """Create ``df_<entity>`` or add any attributes missing from it (schema evolution)."""
-    table = target_table(entity)
+    """Create the entity's table, or evolve it: add missing columns/provenance and migrate changed attribute types."""
+    problems = attribute_problems(attributes)
+    if problems:
+        raise ValueError("; ".join(problems))
+    table = table_for(con, entity)
     cols = [(a["name"], duck_type(a["data_type"])) for a in attributes]
     exists = con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table]).fetchone()
     if not exists:
         ddl = ", ".join(f"{quote_ident(n)} {t}" for n, t in cols + PROVENANCE)
         con.execute(f"CREATE TABLE {quote_ident(table)} ({ddl})")
-    else:
-        have = {r[0].lower() for r in con.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = ?", [table]).fetchall()}
-        for n, t in cols:
-            if n.lower() not in have:
-                con.execute(f"ALTER TABLE {quote_ident(table)} ADD COLUMN {quote_ident(n)} {t}")
+        return table
+    have = {r[0].lower(): r[1].upper() for r in con.execute(f"SELECT column_name, column_type FROM (DESCRIBE {quote_ident(table)})").fetchall()}
+    for n, t in cols:
+        if n.lower() not in have:
+            con.execute(f"ALTER TABLE {quote_ident(table)} ADD COLUMN {quote_ident(n)} {t}")
+        elif have[n.lower()] != t.upper() and not (t.upper() == "TIMESTAMPTZ" and have[n.lower()] == "TIMESTAMP WITH TIME ZONE"):
+            try:         # the dataflow changed this attribute's type: convert the existing values (strict cast)
+                con.execute(f"ALTER TABLE {quote_ident(table)} ALTER COLUMN {quote_ident(n)} SET DATA TYPE {t} "
+                            f"USING CAST({quote_ident(n)} AS {t})")
+            except Exception as e:
+                raise ValueError(f"Column {n!r} changed type from {have[n.lower()]} to {t} and existing values cannot be "
+                                 f"converted ({e}). Fix or delete those rows, or load into a new entity name.") from e
+    added_source = False
+    for n, t in PROVENANCE:
+        if n.lower() not in have:
+            con.execute(f"ALTER TABLE {quote_ident(table)} ADD COLUMN {quote_ident(n)} {t}")
+            added_source = added_source or n == "_source_id"
+    if added_source:
+        con.execute(f"UPDATE {quote_ident(table)} SET _source_id = _source_path WHERE _source_id IS NULL")
     return table
 
 
@@ -193,8 +246,9 @@ def pending_sheets(con, entity: str, layout_hashes: Optional[list[str]] = None, 
                    kind: str = "attribute") -> list[dict]:
     """Distinct (content, sheet) units with a mapped layout and stored bytes, minus those already loaded."""
     rows = con.execute("""
-        SELECT f.sha256, any_value(f.rel_path) AS rel_path, s.sheet, s.layout_hash, min(s.header_row) AS header_row
-        FROM sheets s JOIN files f USING (run_id, rel_path)
+        SELECT f.sha256, any_value(f.rel_path) AS rel_path, s.sheet, s.layout_hash, min(s.header_row) AS header_row,
+               any_value(COALESCE(NULLIF(f.item_id, ''), f.location, f.rel_path)) AS source_id
+        FROM v_sheets s JOIN v_files f USING (run_id, rel_path)
         JOIN file_blobs b ON b.sha256 = f.sha256
         WHERE s.header_row IS NOT NULL AND s.layout_hash IN
               (SELECT DISTINCT layout_hash FROM column_mappings WHERE entity = ? AND kind = ?)
@@ -202,12 +256,12 @@ def pending_sheets(con, entity: str, layout_hashes: Optional[list[str]] = None, 
     done = set() if force else set(con.execute(
         "SELECT source_sha256, sheet FROM load_log WHERE entity = ? AND status = 'ok'", [entity]).fetchall())
     out = []
-    for sha, path, sheet, lh, hr in rows:
+    for sha, path, sheet, lh, hr, sid in rows:
         if layout_hashes and lh not in layout_hashes:
             continue
         if (sha, sheet) in done:
             continue
-        out.append({"sha256": sha, "rel_path": path, "sheet": sheet, "layout_hash": lh, "header_row": hr})
+        out.append({"sha256": sha, "rel_path": path, "sheet": sheet, "layout_hash": lh, "header_row": hr, "source_id": sid})
     return out
 
 
@@ -264,24 +318,22 @@ def _rows_attribute_mode(con, entity, w, blob, col_names, types, order, stats):
 
 def _rows_m_mode(con, entity, w, blob, plan, col_names, types, stats):
     """Run the translated Power Query pipeline over one sheet (staged as VARCHAR columns)."""
-    from .m2sql import stage_table, stage_value
+    from .m2sql import sheet_columns, stage_table, stage_value
     inputs, order = plan["inputs"], plan["date_order"]
     mapping = dict(con.execute("SELECT norm_header, attribute FROM column_mappings WHERE entity = ? AND layout_hash = ? "
                                "AND kind = 'input'", [entity, w["layout_hash"]]).fetchall())
     header, rows = _sheet_rows(blob, w["sheet"], w["header_row"])
-    col_for = {}
-    for i, h in enumerate(_norm_header_cells(header)):
-        if h in mapping and mapping[h] in inputs and mapping[h] not in col_for:
-            col_for[mapping[h]] = i
+    cols = sheet_columns(header, inputs, mapping, _norm_header_cells(header), plan.get("dynamic_columns", False))
+    names = [n for n, _ in cols]
     staged, empty = [], 0
     for k, row in rows:
-        vals = [stage_value(row[col_for[c]]) if c in col_for and col_for[c] < len(row) else None for c in inputs]
+        vals = [stage_value(row[i]) if i is not None and i < len(row) else None for _, i in cols]
         if all(v is None or not v.strip() for v in vals):
             empty += 1
             continue
         stats["ambiguous_dates"] += sum(1 for v in vals if is_ambiguous_date(v))
         staged.append((k, *vals))
-    stage_table(con, inputs, staged)
+    stage_table(con, names, staged)
     res = con.execute(plan["sql"])
     out_cols = [d[0] for d in res.description]
     result_rows = res.fetchall()          # fully fetched: the connection is reused for the INSERTs
@@ -327,6 +379,7 @@ def _load_entity(con, dataflow_id, entity, layout_hashes, force, progress, batch
     from . import transforms
     from .bulk import bulk_insert
     from .m2sql import register_udfs
+    from .store import read_blob
     attrs = [{"name": r[0], "data_type": r[1]} for r in con.execute(
         "SELECT name, data_type FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ? ORDER BY position",
         [dataflow_id, entity]).fetchall()]
@@ -347,7 +400,9 @@ def _load_entity(con, dataflow_id, entity, layout_hashes, force, progress, batch
     total = {"load_id": load_id, "table": table, "sheets_loaded": 0, "sheets_failed": 0, "mode": plan["mode"],
              "rows": 0, "coerce_error_cells": 0, "sheets_planned": len(work), "date_order": order,
              "ambiguous_dates": 0, "replaced_rows": 0}
-    log_sql = "INSERT INTO load_log VALUES (?, ?, ?, ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    log_sql = ("INSERT INTO load_log (load_id, entity, dataflow_id, started_utc, finished_utc, source_sha256, source_path, sheet, "
+               "layout_hash, rows_loaded, rows_skipped_empty, coerce_error_cells, status, error, source_id) "
+               "VALUES (?, ?, ?, ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     for n, w in enumerate(work, 1):
         if progress:
             progress(n, len(work), f"{w['rel_path']} [{w['sheet']}]")
@@ -357,12 +412,13 @@ def _load_entity(con, dataflow_id, entity, layout_hashes, force, progress, batch
         err = ""
         con.execute("BEGIN")
         try:
-            blob = bytes(con.execute("SELECT content FROM file_blobs WHERE sha256 = ?", [w["sha256"]]).fetchone()[0])
-            replaced = con.execute(f"SELECT count(*) FROM {quote_ident(table)} WHERE _source_sha256 = ? AND _sheet = ?",
-                                   [w["sha256"], w["sheet"]]).fetchone()[0]
+            blob = read_blob(con, w["sha256"])
+            # replace what this sheet loaded before: same content (reload) or the same file location with older content
+            same = "(_source_sha256 = ? OR _source_id = ?) AND _sheet = ?"
+            sargs = [w["sha256"], w["source_id"], w["sheet"]]
+            replaced = con.execute(f"SELECT count(*) FROM {quote_ident(table)} WHERE {same}", sargs).fetchone()[0]
             if replaced:
-                con.execute(f"DELETE FROM {quote_ident(table)} WHERE _source_sha256 = ? AND _sheet = ?",
-                            [w["sha256"], w["sheet"]])
+                con.execute(f"DELETE FROM {quote_ident(table)} WHERE {same}", sargs)
             gen = (_rows_m_mode(con, entity, w, blob, plan, col_names, types, stats) if kind == "input"
                    else _rows_attribute_mode(con, entity, w, blob, col_names, types, order, stats))
             buf = []
@@ -372,22 +428,22 @@ def _load_entity(con, dataflow_id, entity, layout_hashes, force, progress, batch
                     continue
                 bad += len(errs)
                 buf.append(vals + [load_id, w["rel_path"], w["sha256"], w["sheet"], k, w["layout_hash"],
-                                   started, ",".join(errs) or None])
+                                   started, ",".join(errs) or None, w["source_id"]])
                 if len(buf) >= batch:
                     loaded += bulk_insert(con, table, all_cols, buf)
                     buf = []
             loaded += bulk_insert(con, table, all_cols, buf)
-            con.execute("UPDATE load_log SET status = 'superseded' WHERE entity = ? AND source_sha256 = ? "
-                        "AND sheet = ? AND status = 'ok'", [entity, w["sha256"], w["sheet"]])
+            con.execute("UPDATE load_log SET status = 'superseded' WHERE entity = ? AND sheet = ? AND status = 'ok' "
+                        "AND (source_sha256 = ? OR source_id = ?)", [entity, w["sheet"], w["sha256"], w["source_id"]])
             con.execute(log_sql, [load_id, entity, dataflow_id, started, w["sha256"], w["rel_path"], w["sheet"],
-                                  w["layout_hash"], loaded, empty, bad, "ok", ""])
+                                  w["layout_hash"], loaded, empty, bad, "ok", "", w["source_id"]])
             con.execute("COMMIT")
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             con.execute("ROLLBACK")                       # no partial rows, no log entry for this sheet
             loaded = replaced = 0
             con.execute(log_sql, [load_id, entity, dataflow_id, started, w["sha256"], w["rel_path"], w["sheet"],
-                                  w["layout_hash"], 0, 0, 0, "error", err])
+                                  w["layout_hash"], 0, 0, 0, "error", err, w["source_id"]])
         if err:
             total["sheets_failed"] += 1
         else:

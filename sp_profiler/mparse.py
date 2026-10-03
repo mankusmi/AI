@@ -27,22 +27,26 @@ TOKEN_RE = re.compile(r"""
 """, re.X | re.S)
 
 
-def tokenize(text: str) -> list[tuple[str, str]]:
+def tokenize_pos(text: str) -> list[tuple[str, str, int, int]]:
+    """Tokens with their (start, end) offsets in ``text`` (whitespace and comments dropped)."""
     out, pos = [], 0
     while pos < len(text):
         m = TOKEN_RE.match(text, pos)
         if not m:
             raise MParseError(f"Unexpected character {text[pos]!r} at {pos}")
-        pos = m.end()
+        start, pos = pos, m.end()
         kind = m.lastgroup
         if kind == "ws":
             continue
         val = m.group()
         if kind == "id" and val in KEYWORDS:
             kind = "kw"
-        out.append((kind, val))
-    out.append(("eof", ""))
+        out.append((kind, val, start, pos))
     return out
+
+
+def tokenize(text: str) -> list[tuple[str, str]]:
+    return [(k, v) for k, v, _, _ in tokenize_pos(text)] + [("eof", "")]
 
 
 def unquote(s: str) -> str:
@@ -209,7 +213,11 @@ class Parser:
             op = self.cur[1]
             self.i += 1
             return {"t": "un", "op": op, "e": self.unary()}
-        return self.postfix()
+        e = self.postfix()
+        while self.at("kw", "meta"):         # `"x" meta [IsParameterQuery = true]`: metadata is parsed and dropped
+            self.i += 1
+            self.unary()
+        return e
 
     def postfix(self):
         e = self.primary()
@@ -298,3 +306,36 @@ class Parser:
 
 def parse_expr(text: str) -> dict:
     return Parser(text).parse()
+
+
+def split_shared_queries(document: str) -> dict[str, str]:
+    """Split a Power Query section document into ``{name: M source}`` using the real tokenizer.
+
+    A query starts at a top-level ``shared`` that follows ``;`` (or an ``[attribute]`` record) and ends at the next
+    top-level ``;``, so strings, nested brackets and comments inside a query cannot confuse the split.
+    """
+    toks = tokenize_pos(document)
+    out: dict[str, str] = {}
+    i, n = 0, len(toks)
+    while i < n:
+        k, v, s, e = toks[i]
+        prev = toks[i - 1] if i else None
+        if k == "id" and v == "shared" and (prev is None or prev[1] in (";", "]") or prev[0] == "field") and i + 2 < n:
+            nk, nv = toks[i + 1][0], toks[i + 1][1]
+            if nk in ("id", "qid") and toks[i + 2][1] == "=":
+                name = unquote(nv[1:]) if nk == "qid" else nv
+                j, depth, start = i + 3, 0, toks[i + 3][2] if i + 3 < n else len(document)
+                while j < n:
+                    kj, vj = toks[j][0], toks[j][1]
+                    if kj == "op" and vj in "([{":
+                        depth += 1
+                    elif kj == "op" and vj in ")]}":
+                        depth -= 1
+                    elif kj == "op" and vj == ";" and depth == 0:
+                        break
+                    j += 1
+                end = toks[j][2] if j < n else len(document)
+                out[name] = document[start:end].strip()
+                i = j
+        i += 1
+    return out

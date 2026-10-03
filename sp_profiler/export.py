@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -71,10 +70,10 @@ def _select_expr(col: str, typ: str, alias: str) -> Optional[str]:
 
 def entity_tables(con) -> dict[str, list[str]]:
     """df_ table name -> entity names that load into it."""
-    from .mapping_load import target_table
+    from .mapping_load import table_for
     out: dict[str, list[str]] = {}
     for (ent,) in con.execute("SELECT DISTINCT entity FROM load_log").fetchall():
-        out.setdefault(target_table(ent), []).append(ent)
+        out.setdefault(table_for(con, ent), []).append(ent)
     return out
 
 
@@ -120,7 +119,7 @@ def export_databricks(con, out_dir: str | Path, tables: Optional[list[str]] = No
         where, watermark = "", None
         if incremental and is_entity:
             ents = ent_map[table]
-            marks = con.execute(f"SELECT max(watermark) FROM export_log WHERE table_name = ? AND mode IN ('incremental','full')",
+            marks = con.execute("SELECT max(watermark) FROM export_log WHERE table_name = ? AND mode IN ('incremental','full')",
                                 [table]).fetchone()[0]
             ph = ", ".join("?" for _ in ents)
             params = list(ents) + ([marks] if marks else [])
@@ -144,7 +143,7 @@ def export_databricks(con, out_dir: str | Path, tables: Optional[list[str]] = No
                f"(FORMAT PARQUET, COMPRESSION SNAPPY, FILE_SIZE_BYTES '128MB', FILENAME_PATTERN 'part-{{i}}')")
         cur.execute(sql, where_params) if where_params else cur.execute(sql)
         files = sorted(p.name for p in dest.glob("*.parquet")) if dest.exists() else []
-        n = cur.execute(f"SELECT count(*) FROM read_parquet(?)", [str(dest / "*.parquet")]).fetchone()[0] if files else 0
+        n = cur.execute("SELECT count(*) FROM read_parquet(?)", [str(dest / "*.parquet")]).fetchone()[0] if files else 0
         con.execute("INSERT INTO export_log VALUES (?, ?, now(), ?, ?, ?)",
                     [export_id, table, manifest["mode"], n, watermark])
         manifest["tables"].append({"name": table, "kind": "entity" if is_entity else "snapshot", "rows": n, "files": files,
@@ -207,10 +206,11 @@ for t in TABLES:
     if t["kind"] == "snapshot" or mode == "full" or not spark.catalog.tableExists(target):
         df.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(target)
     else:
-        # incremental entity table: drop the sheets being (re)loaded, then append them
-        keys = df.select("_source_sha256", "_sheet").distinct()
+        # incremental entity table: drop the sheets being (re)loaded (same content, or the same file location with
+        # older content), then append them
+        keys = df.select("_source_sha256", "_source_id", "_sheet").distinct()
         (DeltaTable.forName(spark, target).alias("t")
-            .merge(keys.alias("k"), "t._source_sha256 = k._source_sha256 AND t._sheet = k._sheet")
+            .merge(keys.alias("k"), "(t._source_sha256 = k._source_sha256 OR t._source_id = k._source_id) AND t._sheet = k._sheet")
             .whenMatchedDelete().execute())
         df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(target)
     print(t["name"], "->", target, df.count(), "rows")

@@ -11,7 +11,6 @@ from sp_profiler import mapping_load as ml
 from sp_profiler.cli import main
 from sp_profiler.export import delta_safe_names, export_databricks, spark_type
 
-from . import test_m_transform as T
 from .test_m_transform import env, map_inputs  # noqa: F401
 
 

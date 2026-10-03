@@ -5,13 +5,11 @@ import os
 import stat
 import sys
 import types
-from pathlib import Path
 
 import openpyxl
 import pytest
 import requests
 
-from sp_profiler import sources
 from sp_profiler.profiler import profile
 from sp_profiler.sources import GRAPH, BrowserAuth, GraphSource
 
@@ -93,7 +91,7 @@ def item(name, size, id_, url=None, folder=False):
 
 def routes(extra=()):
     return [
-        (f"/sites/contoso.sharepoint.com:/sites/Claims", Resp(body={"id": "site1"})),
+        ("/sites/contoso.sharepoint.com:/sites/Claims", Resp(body={"id": "site1"})),
         ("/sites/site1/drives", Resp(body={"value": [{"id": "d0", "name": "Other"}, {"id": "d1", "name": "Documents"}]})),
         ("/drives/d1/root:/Bordereaux/2024:/children", Resp(body={
             "value": [item("jan.xlsx", len(A), "i1", "https://dl.example/jan"), item("Q2", 0, "f1", folder=True)],
@@ -246,3 +244,99 @@ def test_browser_auth_failure_message(fake_msal, tmp_path, monkeypatch):
     auth = BrowserAuth(cache_path=tmp_path / "c.json")
     with pytest.raises(RuntimeError, match="admin consent required"):
         auth.token()
+
+
+def test_sharepoint_run_skips_unchanged_files_by_etag(tmp_path):
+    from sp_profiler.runner import run_profile
+    from sp_profiler.store import open_db
+    con = open_db(str(tmp_path / "g.duckdb"))
+    src, s = make()
+    r1 = run_profile(con, src, "graph", "root", {"site_url": SITE, "library": "Documents", "folder": ""}, workers=3)
+    assert r1["result"]["summary"]["reused_files"] == 0 and len(con.execute("select * from v_files").fetchall()) == 3
+    n_downloads = lambda: sum(1 for u, _ in s.log if u.startswith("https://dl.example/"))
+    assert n_downloads() == 3
+    src2 = GraphSource(SITE, "Bordereaux/2024", "Documents", auth=FakeAuth(), session=s)
+    r2 = run_profile(con, src2, "graph", "root", {"site_url": SITE, "library": "Documents", "folder": ""}, workers=3)
+    assert r2["result"]["summary"]["reused_files"] == 3 and n_downloads() == 3          # nothing downloaded again
+    assert r2["result"]["summary"]["distinct_layouts"] == 1
+    # a new eTag on one file -> only that file is fetched again
+    for key, h in s.routes:
+        if key == "/drives/d1/root:/Bordereaux/2024:/children":
+            h.json()["value"][0]["eTag"] = '"changed"'
+    src3 = GraphSource(SITE, "Bordereaux/2024", "Documents", auth=FakeAuth(), session=s)
+    r3 = run_profile(con, src3, "graph", "root", {"site_url": SITE, "library": "Documents", "folder": ""})
+    assert r3["result"]["summary"]["reused_files"] == 2 and n_downloads() == 4
+
+
+# ----------------------------------------------------------------- encrypted token storage
+class _Persistence:
+    deleted = []
+
+    def __init__(self, path):
+        self.path = path
+
+    def delete(self):
+        _Persistence.deleted.append(self.path)
+
+
+class _PersistedCache(_Cache):
+    def __init__(self, persistence):
+        super().__init__()
+        self.persistence = persistence
+
+
+def fake_extensions(monkeypatch, fail=False):
+    def build(path):
+        if fail:
+            raise RuntimeError("libsecret not available")
+        return _Persistence(path)
+    monkeypatch.setitem(sys.modules, "msal_extensions", types.SimpleNamespace(
+        build_encrypted_persistence=build, PersistedTokenCache=_PersistedCache))
+
+
+def test_token_cache_uses_encrypted_storage_when_available(fake_msal, tmp_path, monkeypatch):
+    fake_extensions(monkeypatch)
+    auth = BrowserAuth(cache_path=tmp_path / "cache.json")
+    assert auth.storage == "encrypted" and isinstance(auth.cache, _PersistedCache)
+    assert auth.token() == "interactive-token"
+    assert not (tmp_path / "cache.json").exists()                  # nothing written in plain text
+
+
+def test_token_cache_falls_back_to_file_and_says_so(fake_msal, tmp_path, monkeypatch, caplog):
+    fake_extensions(monkeypatch, fail=True)
+    with caplog.at_level("WARNING", logger="sp_profiler"):
+        auth = BrowserAuth(cache_path=tmp_path / "cache.json")
+    assert auth.storage == "file" and "plain file" in caplog.text and "libsecret" in caplog.text
+    auth.token()
+    assert (tmp_path / "cache.json").exists()
+    monkeypatch.delitem(sys.modules, "msal_extensions")             # package not installed at all
+    assert BrowserAuth(cache_path=tmp_path / "c2.json").storage == "file"
+
+
+def test_forget_removes_all_cached_sign_ins(fake_msal, tmp_path, monkeypatch):
+    fake_extensions(monkeypatch)
+    _Persistence.deleted.clear()
+    cache = tmp_path / "cache.json"
+    cache.write_text("{}")
+    cache.with_suffix(".enc").write_text("x")
+    BrowserAuth.forget(cache)
+    assert not cache.exists() and not cache.with_suffix(".enc").exists() and _Persistence.deleted
+
+
+def test_token_refresh_is_serialised_across_threads(fake_msal, tmp_path):
+    import threading
+    auth = BrowserAuth(cache_path=tmp_path / "cache.json", secure=False)
+    inside, overlap = [0], []
+
+    def slow():
+        inside[0] += 1
+        overlap.append(inside[0])
+        import time
+        time.sleep(0.02)
+        inside[0] -= 1
+        return []
+    auth.app.get_accounts = slow
+    ths = [threading.Thread(target=auth.token) for _ in range(6)]
+    [t.start() for t in ths]
+    [t.join() for t in ths]
+    assert max(overlap) == 1

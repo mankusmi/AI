@@ -9,11 +9,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import sys
 import threading
+import time
 import traceback
 import uuid
 import webbrowser
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -22,22 +23,32 @@ from . import dataflow as df
 from . import mapping_load as ml
 from . import query as q
 from . import transforms as tf
-from .profiler import profile
-from .sources import FileListSource, GraphSource, LocalSource
-from .store import BlobSink, open_db, save_run
+from .runner import run_profile
+from .sources import DEFAULT_CLIENT_ID, BrowserAuth, FileListSource, GraphSource, LocalSource
+from .store import open_db
 
 WEB_DIR = Path(__file__).parent / "web"
+MAX_BODY = 64 * 1024 * 1024           # largest request body accepted (dataflow JSON uploads are far smaller)
 
 
 class Jobs:
+    KEEP_FINISHED = 30            # finished jobs kept for polling; older ones are dropped
+
     def __init__(self):
         self.jobs: dict[str, dict] = {}
         self.lock = threading.Lock()
 
+    def _prune(self) -> None:
+        finished = [j for j in self.jobs.values() if j["status"] != "running"]
+        for j in sorted(finished, key=lambda j: j["finished"])[:-self.KEEP_FINISHED]:
+            self.jobs.pop(j["id"], None)
+
     def start(self, kind: str, fn) -> str:
         jid = uuid.uuid4().hex[:10]
-        job = {"id": jid, "kind": kind, "status": "running", "done": 0, "total": 0, "message": "", "result": None, "error": ""}
+        job = {"id": jid, "kind": kind, "status": "running", "done": 0, "total": 0, "message": "", "result": None,
+               "error": "", "finished": 0.0}
         with self.lock:
+            self._prune()
             self.jobs[jid] = job
 
         def run():
@@ -48,6 +59,8 @@ class Jobs:
                 job["status"] = "error"
                 job["error"] = f"{type(e).__name__}: {e}"
                 traceback.print_exc()
+            finally:
+                job["finished"] = time.time()
 
         threading.Thread(target=run, daemon=True).start()
         return jid
@@ -58,7 +71,9 @@ class App:
         self.db_path = str(Path(db_path).resolve())
         self.con = open_db(self.db_path)
         self.jobs = Jobs()
-        self.token = secrets.token_urlsafe(24)
+        self.token = secrets.token_urlsafe(24)           # API/session token (never appears in a URL)
+        self.launch_token = secrets.token_urlsafe(24)    # printed link; valid for one page load only
+        self.launch_used = False
         self.home = Path(home or Path.home())
 
     def cur(self):
@@ -93,33 +108,36 @@ class App:
     # ---- jobs ---------------------------------------------------------------
     def start_profile(self, body: dict) -> str:
         files, folder = body.get("files") or [], body.get("folder")
-        store = body.get("store_content", True)
         sp = body.get("sharepoint")
 
         def work(job):
             cur = self.cur()
             if sp:
-                src = GraphSource(sp["site_url"], sp.get("folder", ""), sp.get("library", "Documents"))
+                src = GraphSource(sp["site_url"], sp.get("folder", ""), sp.get("library", "Documents"),
+                                  BrowserAuth(sp.get("tenant_id") or "organizations", sp.get("client_id") or DEFAULT_CLIENT_ID))
                 root, extra, st = f"{sp['site_url']}/{sp.get('library', 'Documents')}", {
                     "site_url": sp["site_url"], "library": sp.get("library", "Documents"), "folder": sp.get("folder", "")}, "graph"
             elif files:
                 src = FileListSource(files)
-                root, extra, st = str(src.root), {}, "local"
+                root, extra, st = str(src.root or "(several drives)"), {}, "local"
             elif folder:
                 src = LocalSource(folder)
                 root, extra, st = str(src.root), {}, "local"
             else:
                 raise ValueError("Choose a folder or files")
-            sink = BlobSink(cur, int(body.get("max_content_mb", 200)) * 1024 * 1024) if store else None
 
             def prog(n, path):
                 job["done"], job["message"] = n, path
 
-            res = profile(src, None, include_all_files=False, progress=prog, blob_sink=sink)
-            run_id = save_run(cur, res, st, root, params={"ui": True}, **extra)
-            return {"run_id": run_id, "summary": {k: res["summary"][k] for k in (
-                "total_files", "inspected_files", "status_counts", "distinct_layouts", "layout_families",
-                "duplicate_files")}}
+            out = run_profile(cur, src, st, root, extra, excel_only=True, store_content=body.get("store_content", True),
+                              max_content_mb=int(body.get("max_content_mb", 200)), blob_dir=body.get("blob_dir") or None,
+                              workers=int(body.get("workers") or (4 if sp else 1)),
+                              include_hidden=bool(body.get("include_hidden")), exact_rows=bool(body.get("exact_rows")),
+                              refresh=bool(body.get("refresh")), progress=prog)
+            res = out["result"]
+            keys = ("total_files", "inspected_files", "status_counts", "distinct_layouts", "layout_families",
+                    "duplicate_files", "reused_files", "files_with_warnings")
+            return {"run_id": out["run_id"], "summary": {k: res["summary"].get(k) for k in keys}}
         return self.jobs.start("profile", work)
 
     def start_load(self, body: dict) -> str:
@@ -132,14 +150,8 @@ class App:
 
     # ---- data access --------------------------------------------------------
     def layouts(self) -> list[dict]:
-        cur = self.cur()
-        rows = cur.execute("""
-            SELECT s.layout_hash, count(DISTINCT f.sha256) AS files, count(*) AS sheets, any_value(f.rel_path) AS example,
-                   any_value(l.headers) AS headers, any_value(l.norm_headers) AS norm_headers
-            FROM sheets s JOIN files f USING (run_id, rel_path)
-            JOIN layouts l ON l.run_id = s.run_id AND l.layout_hash = s.layout_hash
-            WHERE s.header_row IS NOT NULL AND f.sha256 <> ''
-            GROUP BY s.layout_hash ORDER BY files DESC, s.layout_hash""").fetchall()
+        rows = self.cur().execute("SELECT layout_hash, files, sheets, example, headers, norm_headers FROM v_layouts "
+                                  "ORDER BY files DESC, layout_hash").fetchall()
         return [{"layout_hash": h, "files": n, "sheets": s, "example": ex, "headers": hd, "norm_headers": nh}
                 for h, n, s, ex, hd, nh in rows]
 
@@ -155,7 +167,7 @@ class App:
                     "SELECT name, data_type, description FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ? "
                     "ORDER BY position", [did, ent]).fetchall()]
                 ents.append({"name": ent, "description": desc, "m_query": mq, "partitions": parts, "attributes": attrs,
-                             "table": ml.target_table(ent),
+                             "table": ml.table_for(cur, ent),
                              "mapped_layouts": cur.execute("SELECT count(DISTINCT layout_hash) FROM column_mappings WHERE entity = ?", [ent]).fetchone()[0]})
             out.append({"dataflow_id": did, "name": name, "imported": imported, "source_file": src, "entities": ents})
         return out
@@ -186,7 +198,7 @@ class App:
             lay["suggested"] = {h: s for h, s in sugg.items() if h not in lay["saved"]}
             lay["pending"] = lay["layout_hash"] in pending
             out.append(lay)
-        return {"attributes": targets, "layouts": out, "table": ml.target_table(entity), "kind": kind,
+        return {"attributes": targets, "layouts": out, "table": ml.table_for(cur, entity), "kind": kind,
                 "mode": plan["mode"]}
 
     def transform(self, dataflow_id: str, entity: str) -> dict:
@@ -253,7 +265,10 @@ def make_handler(app: App, port: int):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline'; connect-src 'self'")
+            self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline'; connect-src 'self'; "
+                                                        "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "DENY")
             for k, v in (headers or {}).items():
                 self.send_header(k, v)
             self.end_headers()
@@ -279,9 +294,17 @@ def make_handler(app: App, port: int):
                 return
             u = urlparse(self.path)
             if u.path == "/":
-                if not secrets.compare_digest(parse_qs(u.query).get("t", [""])[0], app.token):
-                    return self._send(403, b"Open the URL printed in the terminal (it contains the access token).", "text/plain")
-                return self._send(200, index.replace("__TOKEN__", app.token).encode(), "text/html; charset=utf-8")
+                launch = parse_qs(u.query).get("t", [""])[0]
+                cookie = SimpleCookie(self.headers.get("Cookie", ""))
+                has_session = "sp_session" in cookie and secrets.compare_digest(cookie["sp_session"].value, app.token)
+                fresh = bool(launch) and not app.launch_used and secrets.compare_digest(launch, app.launch_token)
+                if not (fresh or has_session):
+                    return self._send(403, b"This link was already used. Restart sp-profile serve to get a new one.", "text/plain")
+                headers = {}
+                if fresh:
+                    app.launch_used = True          # the URL in the browser history is dead from now on
+                    headers["Set-Cookie"] = f"sp_session={app.token}; HttpOnly; SameSite=Strict; Path=/"
+                return self._send(200, index.replace("__TOKEN__", app.token).encode(), "text/html; charset=utf-8", headers)
             if not u.path.startswith("/api/"):
                 return self._send(404, b"not found", "text/plain")
             if not self._authed():
@@ -297,12 +320,21 @@ def make_handler(app: App, port: int):
                 return
             try:
                 n = int(self.headers.get("Content-Length", 0))
+                if n > MAX_BODY:
+                    return self._json({"error": f"Request too large (limit {MAX_BODY // 1048576} MB)"}, 413)
                 body = json.loads(self.rfile.read(n) or b"{}")
                 u = urlparse(self.path)
                 if u.path == "/api/sql_csv":
-                    text = q.csv_text(app.cur(), body["sql"])
-                    return self._send(200, text.encode("utf-8-sig"), "text/csv; charset=utf-8",
-                                      {"Content-Disposition": 'attachment; filename="query.csv"'})
+                    chunks = q.csv_chunks(app.cur(), body["sql"], bool(body.get("allow_write")))   # same checks as the console
+                    self.send_response(200)
+                    for k, v in (("Content-Type", "text/csv; charset=utf-8"), ("Content-Disposition", 'attachment; filename="query.csv"'),
+                                 ("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff"), ("Connection", "close")):
+                        self.send_header(k, v)
+                    self.end_headers()
+                    self.close_connection = True
+                    for chunk in chunks:
+                        self.wfile.write(chunk.encode("utf-8"))
+                    return
                 self._json(self.route_post(u.path, body))
             except Exception as e:
                 self._error(e)
@@ -357,7 +389,8 @@ def make_handler(app: App, port: int):
                 else:
                     parsed, src = df.parse_model_json(b["content"]), b.get("filename", "upload")
                 did, new = df.store_dataflow(cur, parsed, src)
-                return {"dataflow_id": did, "new": new, "name": parsed["name"],
+                return {"dataflow_id": did, "new": new, "name": parsed["name"], "carried": parsed.get("carried"),
+                        "warnings": df.attribute_problems_of(parsed),
                         "entities": [{"name": e["name"], "attributes": len(e["attributes"])} for e in parsed["entities"]]}
             if path == "/api/mapping/save":
                 kind, targets, _ = app.mapping_targets(cur, b["dataflow_id"], b["entity"])
@@ -405,9 +438,19 @@ def make_handler(app: App, port: int):
 
 def serve(db_path: str, port: int = 8765, open_browser: bool = True) -> None:
     app = App(db_path)
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, port))
-    url = f"http://127.0.0.1:{port}/?t={app.token}"
-    print(f"sp-profile UI  ->  {url}\nDatabase: {app.db_path}\nLocal only (127.0.0.1). Ctrl+C to stop.", flush=True)
+    server, last = None, None
+    for p in range(port, port + 20):                     # first free port at or after the requested one
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", p), make_handler(app, p))
+            port = p
+            break
+        except OSError as e:
+            last = e
+    if server is None:
+        raise SystemExit(f"No free port between {port} and {port + 19}: {last}")
+    url = f"http://127.0.0.1:{port}/?t={app.launch_token}"
+    print(f"sp-profile UI  ->  {url}\nDatabase: {app.db_path}\nLocal only (127.0.0.1). The link works once; "
+          f"Ctrl+C to stop.", flush=True)
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:

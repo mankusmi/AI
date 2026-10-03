@@ -157,11 +157,17 @@ def test_server_auth_and_flow(server, tmp_path):
     app, port, src = server
     assert call(port, "wrong", "/api/state")[0] == 401
     assert call(port, app.token, "/api/state", host="evil.com")[0] == 403
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/?t={app.token}") as r:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/?t={app.launch_token}") as r:
         assert app.token in r.read().decode()
-    with pytest.raises(urllib.error.HTTPError) as ei:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/")
-    assert ei.value.code == 403
+        cookie = r.headers["Set-Cookie"]
+        assert "sp_session=" in cookie and "HttpOnly" in cookie and "SameSite=Strict" in cookie
+    for tok in (app.launch_token, app.token):       # the link is single-use; the API token is never a valid link
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/?t={tok}")
+        assert ei.value.code == 403
+    again = urllib.request.Request(f"http://127.0.0.1:{port}/", headers={"Cookie": f"sp_session={app.token}"})
+    with urllib.request.urlopen(again) as r:       # a reload carries the session cookie
+        assert r.status == 200 and r.headers["X-Frame-Options"] == "DENY" and "frame-ancestors" in r.headers["Content-Security-Policy"]
     s, st = call(port, app.token, "/api/state")
     assert s == 200 and st["files"] == 2
     s, fs = call(port, app.token, f"/api/fs?path={src}")

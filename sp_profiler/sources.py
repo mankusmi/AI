@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import logging
 import shutil
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -89,18 +91,27 @@ class FileListSource:
         if not self.paths:
             raise ValueError("No files given")
         parents = {str(p.parent) for p in self.paths}
-        self.root = Path(os.path.commonpath(parents))
+        try:
+            self.root = Path(os.path.commonpath(parents))
+        except ValueError:            # Windows: files on different drives have no common folder
+            self.root = None
+
+    def _rel(self, full: Path) -> str:
+        if self.root is not None:
+            return full.relative_to(self.root).as_posix()
+        return full.as_posix().replace(":", "")        # "D:/x/y.xlsx" -> "D/x/y.xlsx"
 
     def iter_files(self) -> Iterator[FileEntry]:
         for full in sorted(self.paths):
             st = full.stat()
             yield FileEntry(
-                rel_path=full.relative_to(self.root).as_posix(), name=full.name, size_bytes=st.st_size,
+                rel_path=self._rel(full), name=full.name, size_bytes=st.st_size,
                 modified=_iso(st.st_mtime), created=_iso(st.st_ctime), location=str(full),
                 _materialize=lambda p=full: contextlib.nullcontext(p))
 
 
 # --------------------------------------------------------------------------- graph
+log = logging.getLogger("sp_profiler")
 GRAPH = "https://graph.microsoft.com/v1.0"
 SCOPES = ["Files.Read.All", "Sites.Read.All"]
 # Microsoft's own public client ("Microsoft Graph Command Line Tools"): lets you sign in through the
@@ -111,36 +122,67 @@ CACHE_PATH = Path.home() / ".sp_profiler" / "token_cache.json"
 
 
 class BrowserAuth:
-    """Delegated sign-in through the system browser, with a persistent token cache (silent refresh)."""
+    """Delegated sign-in through the system browser, with a persistent token cache (silent refresh).
+
+    The cache is stored encrypted by the operating system when ``msal-extensions`` can do so (Windows DPAPI, macOS
+    Keychain, Linux libsecret). Otherwise it falls back to a plain JSON file restricted to the current user, and says so.
+    ``token()`` is safe to call from several threads.
+    """
 
     def __init__(self, tenant_id: str = "organizations", client_id: str = DEFAULT_CLIENT_ID,
-                 cache_path: Path = CACHE_PATH):
+                 cache_path: Path = CACHE_PATH, secure: bool = True):
         import msal
         self.cache_path = Path(cache_path)
-        self.cache = msal.SerializableTokenCache()
-        if self.cache_path.exists():
-            self.cache.deserialize(self.cache_path.read_text())
+        self._lock = threading.Lock()
+        self.cache, self.storage = self._build_cache(msal, secure)
         self.app = msal.PublicClientApplication(
             client_id, authority=f"https://login.microsoftonline.com/{tenant_id or 'organizations'}",
             token_cache=self.cache)
 
-    def token(self) -> str:
-        res = None
-        accounts = self.app.get_accounts()
-        if accounts:
-            res = self.app.acquire_token_silent(SCOPES, account=accounts[0])
-        if not res:
-            res = self.app.acquire_token_interactive(SCOPES)   # opens the browser
-        if "access_token" not in res:
-            raise RuntimeError(f"Sign-in failed: {res.get('error_description', res)}")
-        if self.cache.has_state_changed:
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_text(self.cache.serialize())
+    def _build_cache(self, msal, secure: bool):
+        if secure:
             try:
-                self.cache_path.chmod(0o600)
-            except OSError:
-                pass
-        return res["access_token"]
+                from msal_extensions import PersistedTokenCache, build_encrypted_persistence
+                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+                return PersistedTokenCache(build_encrypted_persistence(str(self.cache_path.with_suffix(".enc")))), "encrypted"
+            except Exception as e:      # package missing, or no keyring/libsecret on this machine
+                log.warning("Encrypted token storage is unavailable (%s: %s); the sign-in will be cached in a plain file "
+                            "readable only by you: %s", type(e).__name__, e, self.cache_path)
+        cache = msal.SerializableTokenCache()
+        if self.cache_path.exists():
+            cache.deserialize(self.cache_path.read_text())
+        return cache, "file"
+
+    @staticmethod
+    def forget(cache_path: Path = CACHE_PATH) -> None:
+        """Delete every cached sign-in (encrypted store and plain file)."""
+        cache_path = Path(cache_path)
+        try:
+            from msal_extensions import build_encrypted_persistence
+            build_encrypted_persistence(str(cache_path.with_suffix(".enc"))).delete()
+        except Exception:
+            pass
+        for p in (cache_path, cache_path.with_suffix(".enc")):
+            p.unlink(missing_ok=True)
+
+    def token(self) -> str:
+        with self._lock:
+            res = None
+            accounts = self.app.get_accounts()
+            if accounts:
+                res = self.app.acquire_token_silent(SCOPES, account=accounts[0])
+            if not res:
+                res = self.app.acquire_token_interactive(SCOPES)   # opens the browser
+            if "access_token" not in res:
+                raise RuntimeError(f"Sign-in failed: {res.get('error_description', res)}")
+            if self.storage == "file" and self.cache.has_state_changed:
+                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+                self.cache_path.write_text(self.cache.serialize())
+                try:
+                    self.cache_path.chmod(0o600)
+                except OSError:
+                    pass
+            return res["access_token"]
 
 
 class GraphSource:

@@ -10,14 +10,20 @@ import argparse
 import os
 import sys
 
-from .profiler import profile
+import logging
+
+from .runner import run_profile
 from .report import write_outputs
-from .sources import CACHE_PATH, DEFAULT_CLIENT_ID, BrowserAuth, GraphSource, LocalSource
-from .store import BlobSink, export_file, open_db, save_run
+from .sources import DEFAULT_CLIENT_ID, BrowserAuth, GraphSource, LocalSource
+from .store import export_file, open_db
 from .stats import human_size
 
 
+log = logging.getLogger("sp_profiler")
+
+
 def main(argv=None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     p = argparse.ArgumentParser(prog="sp-profile", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="source", required=True)
@@ -28,8 +34,13 @@ def main(argv=None) -> int:
         sp.add_argument("--ext", nargs="*", help="extensions to open (default: xlsx xlsm xltx xltm xls xlsb)")
         sp.add_argument("--scan-rows", type=int, default=50, help="rows scanned from the top to find the header row")
         sp.add_argument("--min-headers", type=int, default=3, help="min text cells for a row to count as header")
-        sp.add_argument("--no-content", action="store_true", help="do not store file bytes in DuckDB")
+        sp.add_argument("--no-content", action="store_true", help="do not store file bytes")
+        sp.add_argument("--blob-dir", default="", help="store file bytes in this folder (by hash) instead of inside DuckDB")
         sp.add_argument("--max-content-mb", type=int, default=200, help="skip storing files larger than this")
+        sp.add_argument("--workers", type=int, default=0, help="files inspected in parallel (default: 4 for SharePoint, 1 local)")
+        sp.add_argument("--include-hidden", action="store_true", help="also profile hidden sheets")
+        sp.add_argument("--exact-rows", action="store_true", help="count data rows exactly (slower; default uses sheet dimensions)")
+        sp.add_argument("--refresh", action="store_true", help="re-inspect every file instead of reusing unchanged ones")
         sp.add_argument("--excel-only", action="store_true", help="omit non-Excel files from the inventory")
 
     lo = sub.add_parser("local", help="local folder or OneDrive-synced SharePoint library")
@@ -94,32 +105,34 @@ def main(argv=None) -> int:
         src, root, extra = LocalSource(a.path), str(LocalSource(a.path).root), {}
     else:
         if a.logout:
-            CACHE_PATH.unlink(missing_ok=True)
+            BrowserAuth.forget()
             print("Cached sign-in removed.")
             return 0
         src = GraphSource(a.site_url, a.folder, a.library, BrowserAuth(a.tenant_id, a.client_id))
         root, extra = f"{a.site_url}/{a.library}/{a.folder}".rstrip("/"), \
             {"site_url": a.site_url, "library": a.library, "folder": a.folder}
 
-    def progress(n, path):
-        print(f"[{n}] {path}", file=sys.stderr, flush=True)
-
     con = open_db(a.db)
-    sink = None if a.no_content else BlobSink(con, a.max_content_mb * 1024 * 1024)
-    res = profile(src, a.ext, a.scan_rows, a.min_headers, not a.excel_only, progress, sink)
-    run_id = save_run(con, res, a.source, root, params={"scan_rows": a.scan_rows, "ext": a.ext,
-                                                       "min_headers": a.min_headers}, **extra)
+    out = run_profile(con, src, a.source, root, extra, ext=a.ext, scan_rows=a.scan_rows, min_headers=a.min_headers,
+                      excel_only=a.excel_only, store_content=not a.no_content, max_content_mb=a.max_content_mb,
+                      blob_dir=a.blob_dir or None, workers=a.workers or (4 if a.source == "graph" else 1),
+                      include_hidden=a.include_hidden, exact_rows=a.exact_rows, refresh=a.refresh,
+                      progress=lambda n, path: log.info("[%d] %s", n, path))
     con.close()
+    res, run_id = out["result"], out["run_id"]
     paths = write_outputs(res, a.out) if a.out else {}
     s = res["summary"]
     print(f"\n{s['total_files']} files, {human_size(s['size_bytes'].get('sum', 0))}; "
-          f"{s['inspected_files']} Excel inspected {s['status_counts']}")
+          f"{s['inspected_files']} Excel inspected {s['status_counts']}"
+          + (f"; {s['reused_files']} unchanged (reused)" if s.get("reused_files") else ""))
     print(f"{s['distinct_layouts']} distinct layouts in {s['layout_families']} families "
           f"({s['files_with_multiple_layouts']} files hold >1 layout); {s['duplicate_files']} duplicate files")
+    if s.get("files_with_warnings"):
+        print(f"WARNING: {s['files_with_warnings']} file(s) have warnings (see files.warnings), e.g. formulas with no stored value")
     print(f"  duckdb     {a.db}  (run_id {run_id})")
     for k, v in paths.items():
         print(f"  {k:10s} {v}")
-    return 0
+    return 2 if s["status_counts"].get("error") else 0
 
 
 if __name__ == "__main__":

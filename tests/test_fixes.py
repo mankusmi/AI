@@ -201,3 +201,104 @@ def test_concurrent_loads_do_not_duplicate(env):  # noqa: F811
     [t.join() for t in ths]
     assert sum(o["rows"] for o in out) == 3
     assert con.execute("select count(*) from df_policies").fetchone()[0] == 3
+
+
+# ---------------------------------------------------------------- more Power Query coverage
+BASE = 'let S = Excel.Workbook(File.Contents("x"), null, true), P = Table.PromoteHeaders(S), '
+
+
+def _rows(m, raw_rows, entity="E", queries=None):
+    """Stage ``raw_rows`` (a list of {column: value}) the way the loader does, then run the translated pipeline."""
+    p = Translator({entity: m, **(queries or {})}).translate(entity)
+    cols = list(p.inputs)
+    if p.dynamic_columns:
+        cols += [c for c in raw_rows[0] if c not in cols]
+    cur = duckdb.connect().cursor()
+    register_udfs(cur)
+    stage_table(cur, cols, [(i + 2, *[r.get(c) for c in cols]) for i, r in enumerate(raw_rows)])
+    res = cur.execute(p.sql())
+    return p, [d[0] for d in res.description], res.fetchall()
+
+
+def test_group_by_aggregations():
+    m = BASE + ('T = Table.TransformColumnTypes(P, {{"amt", type number}}), '
+                'G = Table.Group(T, {"pol"}, {{"total", each List.Sum([amt]), type number}, {"n", each Table.RowCount(_), Int64.Type}, '
+                '{"ccys", each List.Count(List.Distinct([ccy])), Int64.Type}, {"top", each List.Max([amt]), type number}}) in G')
+    p, cols, rows = _rows(m, [{"pol": "P1", "amt": "10", "ccy": "GBP"}, {"pol": "P1", "amt": "5.5", "ccy": "EUR"},
+                         {"pol": "P2", "amt": "7", "ccy": "GBP"}, {"pol": "P1", "amt": "1", "ccy": "GBP"}])
+    got = {r[cols.index("pol")]: dict(zip(cols, r)) for r in rows}
+    assert p.complete and set(p.inputs) == {"pol", "amt", "ccy"}
+    assert got["P1"]["total"] == 16.5 and got["P1"]["n"] == 3 and got["P1"]["ccys"] == 2 and got["P1"]["top"] == 10.0
+    assert got["P2"]["n"] == 1 and "__row" not in cols
+    local = m.replace('Int64.Type}, {"ccys"', 'Int64.Type}, {"ccys"').replace("}}) in G", "}}, GroupKind.Local) in G")
+    assert not Translator({"E": local}).translate("E").complete
+
+
+def test_unpivot_other_columns_and_explicit_unpivot():
+    m = BASE + 'U = Table.UnpivotOtherColumns(P, {"pol"}, "Month", "Amount") in U'
+    p, cols, rows = _rows(m, [{"pol": "P1", "Jan": "10", "Feb": "20", "Mar": None}, {"pol": "P2", "Jan": None, "Feb": "5", "Mar": "7"}])
+    assert p.complete and p.inputs == ["pol"] and p.dynamic_columns        # month columns are staged from the sheet itself
+    got = sorted((r[cols.index("pol")], r[cols.index("Month")], r[cols.index("Amount")]) for r in rows)
+    assert got == [("P1", "Feb", "20"), ("P1", "Jan", "10"), ("P2", "Feb", "5"), ("P2", "Mar", "7")]      # nulls dropped, as in M
+    assert {r[cols.index("__row")] for r in rows} == {2, 3}                                                # provenance survives
+    m2 = BASE + 'U = Table.Unpivot(P, {"Jan", "Feb"}, "Month", "Amount") in U'
+    p2, cols2, rows2 = _rows(m2, [{"Jan": "10", "Feb": "20"}])
+    assert sorted(r[cols2.index("Month")] for r in rows2) == ["Feb", "Jan"] and set(p2.inputs) == {"Jan", "Feb"}
+
+
+def test_split_and_combine_columns():
+    m = BASE + ('S = Table.SplitColumn(P, "full", Splitter.SplitTextByDelimiter(","), {"first", "second", "third"}), '
+                'C = Table.CombineColumns(S, {"first", "second"}, Combiner.CombineTextByDelimiter(" ", QuoteStyle.None), "name") in C')
+    p, cols, rows = _rows(m, [{"full": "Ann,Lee"}])
+    r = dict(zip(cols, rows[0]))
+    assert p.complete and r["name"] == "Ann Lee" and r["third"] is None and "full" not in cols and "first" not in cols
+    bad = BASE + 'S = Table.SplitColumn(P, "full", Splitter.SplitTextByPositions({0, 3}), {"a", "b"}) in S'
+    assert not Translator({"E": bad}).translate("E").complete
+
+
+def test_parameters_become_constants():
+    queries = {"MinYear": "2023 meta [IsParameterQuery = true, Type = \"Number\", IsParameterQueryRequired = true]",
+               "Ccy": '"GBP" meta [IsParameterQuery = true]'}
+    m = BASE + ('T = Table.TransformColumnTypes(P, {{"yr", Int64.Type}}), '
+                'F = Table.SelectRows(T, each [yr] >= MinYear and [ccy] = Ccy) in F')
+    p, cols, rows = _rows(m, [{"yr": "2022", "ccy": "GBP"}, {"yr": "2024", "ccy": "GBP"}, {"yr": "2024", "ccy": "EUR"}], queries=queries)
+    assert p.complete and [r[0] for r in rows] == [3]
+    missing = BASE + 'F = Table.SelectRows(P, each [yr] >= Unknown) in F'
+    assert not Translator({"E": missing}).translate("E").complete
+
+
+def test_query_splitting_survives_attributes_strings_and_comments():
+    from sp_profiler.dataflow import extract_m_queries
+    doc = ('section Section1;\n[Description = "a; b"] shared Year = 2024 meta [IsParameterQuery = true];\n'
+           'shared #"My Query" = let S = "shared X = 1;", // shared Y = 2;\n  T = Table.FromRows({{1}}, {"a"}) in T;\n'
+           'shared Other = "x";\n')
+    q = extract_m_queries(doc)
+    assert list(q) == ["Year", "My Query", "Other"] and "shared X = 1;" in q["My Query"]
+    assert parse_expr(q["Year"])["v"] == 2024
+
+
+def test_unpivot_dataflow_loads_month_columns_end_to_end(tmp_path):
+    from sp_profiler.cli import main
+    src = tmp_path / "src"
+    src.mkdir()
+    make_book(src / "m.xlsx", ["Policy", "Jan", "Feb", "Mar"], [["P1", 10, 20, None], ["P2", None, 5, "7"]])
+    model = {"name": "Monthly", "culture": "en-GB", "pbi:mashup": {"document": "section Section1;\r\nshared Monthly = " + (
+        'let S = Excel.Workbook(File.Contents("x"), null, true), P = Table.PromoteHeaders(S), '
+        'U = Table.UnpivotOtherColumns(P, {"Policy"}, "Month", "Amount"), '
+        'T = Table.TransformColumnTypes(U, {{"Amount", Currency.Type}}) in T') + ";\r\n"},
+        "entities": [{"name": "Monthly", "attributes": [{"name": "Policy", "dataType": "string"},
+                                                        {"name": "Month", "dataType": "string"}, {"name": "Amount", "dataType": "decimal"}]}]}
+    db = tmp_path / "t.duckdb"
+    assert main(["local", "--path", str(src), "--db", str(db)]) == 0
+    con = open_db(str(db))
+    did, _ = df.store_dataflow(con, df.parse_model_json(json.dumps(model)))
+    plan = tf.resolve(con, did, "Monthly")
+    assert plan["mode"] == "m" and plan["dynamic_columns"] and plan["inputs"] == ["Policy"]
+    map_inputs(con, did, "Monthly")
+    r = ml.load_entity(con, did, "Monthly")
+    assert r["rows"] == 4 and r["sheets_failed"] == 0, r
+    got = sorted(con.execute("select Policy, Month, Amount, _excel_row from df_monthly").fetchall())
+    assert [(g[0], g[1], g[2]) for g in got] == [("P1", "Feb", Decimal("20")), ("P1", "Jan", Decimal("10")),
+                                                 ("P2", "Feb", Decimal("5")), ("P2", "Mar", Decimal("7"))]
+    assert {g[3] for g in got} == {3, 4}
+    assert tf.stage_sample(con.cursor(), plan, "Monthly", con.execute("select layout_hash from layouts").fetchone()[0]) == 2

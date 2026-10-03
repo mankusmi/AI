@@ -25,7 +25,7 @@ status, layout), `sheets`, `sheet_headers` (one row per header cell), `layouts`;
 `v_file_layouts`, `v_duplicates` show the latest run.
 
 ```sql
-SELECT layout, family, files, columns FROM v_layouts ORDER BY files DESC;
+SELECT layout, files, sheets, columns, example FROM v_layouts ORDER BY files DESC;
 SELECT path_segments[1] AS top_folder, count(*), sum(size_bytes) FROM v_files GROUP BY 1;
 ```
 
@@ -63,7 +63,7 @@ The DuckDB file contains your file contents and the token cache holds a refresh 
 ## Browser UI
 
 ```bash
-sp-profile serve --db profile.duckdb      # prints http://127.0.0.1:8765/?t=<token> and opens it
+sp-profile serve --db profile.duckdb      # prints a one-time link (http://127.0.0.1:8765/?t=...) and opens it
 ```
 
 1. **Sources** – browse folders/files on this computer (OneDrive-synced SharePoint works), tick files or profile a whole
@@ -144,3 +144,47 @@ The notebook then deletes those sheets from the target (matching `_source_sha256
 reloaded sheets replace rather than duplicate and re-running the notebook is safe. The mode is fixed per export (a full export
 overwrites, an incremental one merges). Metadata tables are always exported in full and overwritten. Rows you delete by hand in DuckDB are
 not propagated to Databricks; do a full export for that.
+
+## Large runs, re-runs and views
+
+* **Progress is saved as it goes.** A run is written to DuckDB in batches, so a crash or Ctrl+C at file 900 of 1000 keeps those 900
+  (`runs.status` is `running`/`failed`/`complete`). Re-running reuses them.
+* **Unchanged files are not opened again.** A file is reused when its identity (SharePoint item id, else path), size and eTag
+  (SharePoint) or modified time (local) match an earlier run made with the same settings, and its bytes are still stored. Nothing is
+  downloaded for it. `--refresh` re-inspects everything; changed files are always re-inspected; failed ones are retried.
+* **Parallel:** `--workers N` (default 4 for SharePoint, 1 for local) inspects files concurrently.
+* **Views show the latest known state of every file**, not just the last run: `v_files` (one row per file: SharePoint item id, else
+  path), `v_sheets`, `v_layouts`, `v_file_layouts`, `v_duplicates`; `v_files_last_run` is the old "last run only" view.
+* **File bytes** can live in a folder instead of inside DuckDB: `--blob-dir D:/bdx_files` (stored by hash, so duplicates are free).
+* **Changed files replace their rows.** If a file at the same location changes, loading it replaces the rows loaded from its
+  previous version (matched on `_source_id` + sheet) instead of adding a second copy; the Databricks notebook does the same.
+* **Header detection and warnings:** years/dates count as header cells (`2023 | 2024 | 2025`), hidden sheets are skipped unless
+  `--include-hidden`, `--exact-rows` counts rows exactly, and files whose formulas were never calculated (saved by a script, no cached
+  values) get a warning in `files.warnings` because those cells would load as empty.
+* **Table names are registered** (`entity_tables`) so entities like `A B` and `A-B` never share a table; if the dataflow changes an
+  attribute's type the column is converted in place (strict cast, with a clear error if values do not fit). Re-importing a dataflow with
+  the same name carries lookup bindings and entity settings over to the new version.
+
+## Power Query: more steps
+
+Also supported now: `Table.Group` (global; `List.Sum/Max/Min/Average/Count`, `Table.RowCount`, distinct counts), `Table.Unpivot` and
+`Table.UnpivotOtherColumns` (the other sheet columns are staged under their own header text), `Table.SplitColumn`
+(`Splitter.SplitTextByDelimiter`), `Table.CombineColumns` (`Combiner.CombineTextByDelimiter`), parameter queries
+(`shared Year = 2024 meta [IsParameterQuery = true]` become constants), `x is null`, and a tokenizer-based query splitter that copes with
+attributes, comments and `;`/`shared` inside strings.
+
+## Security notes
+
+* The launch link works **once** (then a `HttpOnly`, `SameSite=Strict` session cookie is used) and is removed from the address bar, so the
+  token does not stay in browser history. Requests over 64 MB are refused; finished jobs are cleaned up; if the port is busy the next free
+  one is used.
+* In read-only mode the SQL console, CSV download and profiling refuse file/environment functions (`read_csv`, `read_blob`, `glob`,
+  `getenv`, `query`, `FROM 'file.csv'` ...). This is best-effort protection for a single-user local tool, not a sandbox; ticking
+  "allow changes" lifts it. (The CSV download previously ran any SQL regardless of that setting; fixed.)
+* The SharePoint sign-in is cached **encrypted by the OS** (Windows DPAPI / macOS Keychain / Linux libsecret) when `msal-extensions` can
+  use it; otherwise a plain file restricted to your user, with a warning. `sp-profile graph --logout` removes both.
+
+## Development
+
+`pip install -e ".[dev]"`, then `ruff check sp_profiler ...` and `pytest` (the browser test runs when Playwright and Chromium are
+installed: `playwright install chromium`, or set `SP_CHROMIUM`). CI runs both on Linux and Windows (`.github/workflows/tests.yml`).

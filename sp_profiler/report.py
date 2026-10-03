@@ -35,14 +35,14 @@ def write_outputs(result: dict, out_dir: str | Path) -> dict[str, Path]:
         "header_count", "layout", "layout_hash", "set_hash", "headers"])
 
     layout_rows = []
-    for l in result["layouts"]:
-        d = result["layout_diffs"][l.layout_id]
+    for lay in result["layouts"]:
+        d = result["layout_diffs"][lay.layout_id]
         layout_rows.append({
-            "layout": l.layout_id, "family": l.family, "files": len(l.files), "sheets": l.sheets,
-            "columns": len(l.norm_headers), "total_data_rows": l.total_rows,
+            "layout": lay.layout_id, "family": lay.family, "files": len(lay.files), "sheets": lay.sheets,
+            "columns": len(lay.norm_headers), "total_data_rows": lay.total_rows,
             "added_vs_family_seed": d["added"], "removed_vs_family_seed": d["removed"],
-            "reordered_vs_family_seed": d["reordered"], "headers": l.headers,
-            "examples": l.examples, "layout_hash": l.layout_hash})
+            "reordered_vs_family_seed": d["reordered"], "headers": lay.headers,
+            "examples": lay.examples, "layout_hash": lay.layout_hash})
     paths["layouts"] = out / "layouts.csv"
     _csv(paths["layouts"], layout_rows, list(layout_rows[0]) if layout_rows else ["layout"])
 
@@ -76,14 +76,14 @@ def render_html(result: dict) -> str:
                   human_size(d["p90"]), human_size(d["max"]), human_size(d["sum"])]
                  for ext, d in s["size_bytes_by_extension"].items()]
     lay_rows = []
-    for l in result["layouts"]:
-        d = result["layout_diffs"][l.layout_id]
+    for lay in result["layouts"]:
+        d = result["layout_diffs"][lay.layout_id]
         change = []
         if d["added"]: change.append("+" + ", ".join(d["added"][:5]))
         if d["removed"]: change.append("−" + ", ".join(d["removed"][:5]))
         if d["reordered"]: change.append("reordered")
-        lay_rows.append([l.layout_id, l.family, len(l.files), l.sheets, len(l.norm_headers),
-                         " | ".join(change) or "(seed)", ", ".join(l.headers[:12]) + (" …" if len(l.headers) > 12 else "")])
+        lay_rows.append([lay.layout_id, lay.family, len(lay.files), lay.sheets, len(lay.norm_headers),
+                         " | ".join(change) or "(seed)", ", ".join(lay.headers[:12]) + (" …" if len(lay.headers) > 12 else "")])
     problems = [[f["rel_path"], f["status"], f["error"]] for f in result["files"]
                 if f["inspected"] and f["status"] != "ok"]
     return f"""<!doctype html><meta charset=utf-8><title>SharePoint file profile</title>

@@ -77,12 +77,12 @@ def test_translate_full_policies_pipeline():
 
 def test_unsupported_step_is_reported_not_skipped():
     m = {"E": 'let S = Excel.Workbook(File.Contents("x"), null, true), P = Table.PromoteHeaders(S), '
-              'G = Table.Group(P, {"a"}, {{"n", each List.Count([b]), type number}}), '
+              'G = Table.Pivot(P, {"a"}, "b", "c"), '
               'R = Table.RenameColumns(G, {{"a","A"}}) in R'}
     p = Translator(m).translate("E")
     assert not p.complete
     bad = [s for s in p.steps if not s["ok"]]
-    assert [s["name"] for s in bad] == ["G", "R"] and "Table.Group" in bad[0]["error"]
+    assert [s["name"] for s in bad] == ["G", "R"] and "Table.Pivot" in bad[0]["error"]
     assert "depends" in bad[1]["error"] or "G" in bad[1]["error"] or "not" in bad[1]["error"]
 
 

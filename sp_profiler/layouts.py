@@ -34,7 +34,7 @@ def build_layouts(records: list[dict]) -> list[Layout]:
         lay.total_rows += r["data_rows"]
         if len(lay.examples) < 3 and r["rel_path"] not in lay.examples:
             lay.examples.append(r["rel_path"])
-    layouts = sorted(by_hash.values(), key=lambda l: (-len(l.files), -l.sheets, l.layout_hash))
+    layouts = sorted(by_hash.values(), key=lambda lay: (-len(lay.files), -lay.sheets, lay.layout_hash))
     for i, lay in enumerate(layouts, 1):
         lay.rank = i
     assign_families(layouts)
@@ -62,7 +62,7 @@ def assign_families(layouts: list[Layout], threshold: float = 0.8) -> None:
 
 def diff_to_seed(layout: Layout, layouts: list[Layout]) -> dict:
     """Added/removed headers relative to the first layout of the same family."""
-    seed = next(l for l in layouts if l.family == layout.family)
+    seed = next(lay for lay in layouts if lay.family == layout.family)
     a, b = set(seed.norm_headers), set(layout.norm_headers)
     return {"added": sorted(b - a), "removed": sorted(a - b),
             "reordered": a == b and seed.norm_headers != layout.norm_headers}

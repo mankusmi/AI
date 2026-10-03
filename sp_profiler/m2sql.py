@@ -74,10 +74,13 @@ MACROS = [
 ]
 
 
-def register_udfs(cur) -> None:
+def ensure_macros(cur) -> None:
     """Make sure the sp_* conversion macros exist (they live in the database; idempotent)."""
     for ddl in MACROS:
         cur.execute(ddl)
+
+
+register_udfs = ensure_macros          # old name, kept for callers/tests
 
 
 def _plain(fn):
@@ -152,6 +155,7 @@ class Pipeline:
     references: dict = field(default_factory=dict)
     complete: bool = False
     error: str = ""
+    dynamic_columns: bool = False        # UnpivotOtherColumns: every other sheet column must be staged, not just the inputs
 
     def sql(self, final: Optional[str] = None, limit: Optional[int] = None) -> str:
         parts = [f'{q(n)} AS ({s})' for n, s in self.ctes]
@@ -184,6 +188,15 @@ class Translator:
         self._n = 0
         self._resolving: list[str] = []
         self._query_rels: dict[str, Rel] = {}
+
+    def constant(self, name: str):
+        """A parameter query (a literal, e.g. ``shared Year = 2024 meta [IsParameterQuery = true]``) as an AST literal."""
+        ast = self.queries.get(name)
+        if ast is not None and ast["t"] == "lit":
+            return ast
+        if ast is not None and ast["t"] == "un" and ast["op"] == "-" and ast["e"]["t"] == "lit":
+            return ast
+        return None
 
     # ---- public ----------------------------------------------------------------
     def translate(self, entity: str) -> Pipeline:
@@ -658,6 +671,109 @@ class Translator:
         return self._emit("combine", " UNION ALL BY NAME ".join(parts), known=known, open=any(r.open for r in rels),
                           from_src=any(r.from_src for r in rels), has_row=False, kinds=kinds)
 
+    # -- aggregation / reshaping ---------------------------------------------------------
+    _AGGS = {"List.Sum": "sum", "List.Max": "max", "List.Min": "min", "List.Average": "avg", "List.Count": "count"}
+
+    def _agg_sql(self, body, rel, main) -> tuple[str, str]:
+        """SQL for one Table.Group aggregation body such as ``List.Sum([amt])`` or ``Table.RowCount(_)``."""
+        if body["t"] == "call" and body["fn"]["t"] == "id":
+            fn, args = body["fn"]["name"], body["args"]
+            if fn == "Table.RowCount":
+                return "count(*)", "num"
+            if fn in self._AGGS and len(args) == 1:
+                arg = args[0]
+                distinct = False
+                if arg["t"] == "call" and arg["fn"]["t"] == "id" and arg["fn"]["name"] == "List.Distinct" and fn == "List.Count":
+                    arg, distinct = arg["args"][0], True
+                if arg["t"] == "field" and (arg["of"] is None or arg["of"]["t"] == "id" and arg["of"]["name"] == "_"):
+                    sql, kind = self._ex(rel, main).sql({"t": "field", "of": None, "name": arg["name"]})
+                    if fn == "List.Count":
+                        return (f"count(DISTINCT {sql})" if distinct else f"count({sql})"), "num"
+                    if fn in ("List.Max", "List.Min") and kind == "text":
+                        return f"{self._AGGS[fn]}({sql})", "text"
+                    return f"{self._AGGS[fn]}({Expr.num(sql, kind)})", "num"
+        raise Unsupported("unsupported aggregation (supported: List.Sum/Max/Min/Average/Count of a column, "
+                          "List.Count(List.Distinct(column)), Table.RowCount(_))")
+
+    def f_Table_Group(self, args, scope, main, qname):
+        rel = self._src_arg(args, scope, main, qname)
+        if len(args) > 3 and not (args[3]["t"] == "id" and args[3]["name"] == "GroupKind.Global"):
+            raise Unsupported("only global grouping is supported (GroupKind.Local is not)")
+        keys = self._str_list(args[1])
+        self._use(rel, keys, "Group", main)
+        sel, kinds = [q(k) for k in keys], {k: v for k, v in rel.kinds.items() if k in keys}
+        for it in self._pairs(args[2]):
+            name, fn = self._const_str(it[0]), it[1]
+            if fn["t"] != "each":
+                raise Unsupported("aggregations must be `each` expressions")
+            sql, kind = self._agg_sql(fn["body"], rel, main)
+            if len(it) > 2:
+                tname = type_name(it[2])
+                sql, kind = cast_type(sql, tname, self.order), TYPE_KIND.get(tname, kind)
+            sel.append(f"{sql} AS {q(name)}")
+            if kind in ("num", "text", "date", "bool"):
+                kinds[name] = kind
+        group = f" GROUP BY {', '.join(q(k) for k in keys)}" if keys else ""
+        return self._emit("group", f"SELECT {', '.join(sel)} FROM {q(rel.cte)}{group}",
+                          known=set(keys) | {self._const_str(i[0]) for i in self._pairs(args[2])},
+                          open=False, from_src=rel.from_src, has_row=False, kinds=kinds)
+
+    def _unpivot(self, rel, on_sql: str, attr: str, val: str, known, open_, main):
+        return self._emit("unpivot", f"SELECT * FROM (UNPIVOT {q(rel.cte)} ON {on_sql} INTO NAME {q(attr)} VALUE {q(val)})",
+                          known=known | {attr, val}, open=open_, from_src=rel.from_src, has_row=rel.has_row,
+                          kinds={k: v for k, v in rel.kinds.items() if k in known})
+
+    def f_Table_UnpivotOtherColumns(self, args, scope, main, qname):
+        rel = self._src_arg(args, scope, main, qname)
+        keep = self._str_list(args[1])
+        self._use(rel, keep, "UnpivotOtherColumns", main)
+        attr, val = self._const_str(args[2]), self._const_str(args[3])
+        if rel.from_src and main:
+            self.p.dynamic_columns = True
+        excl = ", ".join(q(c) for c in keep + (["__row"] if rel.has_row else []))
+        return self._unpivot(rel, f"COLUMNS(* EXCLUDE ({excl}))", attr, val, set(keep), False, main)
+
+    def f_Table_Unpivot(self, args, scope, main, qname):
+        rel = self._src_arg(args, scope, main, qname)
+        cols = self._str_list(args[1])
+        self._use(rel, cols, "Unpivot", main)
+        attr, val = self._const_str(args[2]), self._const_str(args[3])
+        return self._unpivot(rel, ", ".join(q(c) for c in cols), attr, val, rel.known - set(cols), rel.open, main)
+
+    @staticmethod
+    def _delimiter(node, what: str) -> str:
+        if node["t"] == "call" and node["fn"]["t"] == "id" and node["fn"]["name"] == what and node["args"] \
+                and node["args"][0]["t"] == "lit" and node["args"][0]["kind"] == "str":
+            return node["args"][0]["v"]
+        raise Unsupported(f"only {what}(\"<delimiter>\") is supported")
+
+    def f_Table_SplitColumn(self, args, scope, main, qname):
+        rel = self._src_arg(args, scope, main, qname)
+        col = self._const_str(args[1])
+        self._use(rel, [col], "SplitColumn", main)
+        delim = self._delimiter(args[2], "Splitter.SplitTextByDelimiter")
+        if len(args) < 4 or args[3]["t"] != "list":
+            raise Unsupported("SplitColumn needs a literal list of new column names")
+        names = self._str_list(args[3])
+        parts = ", ".join(f"list_extract(string_split(CAST({q(col)} AS VARCHAR), {lit(delim)}), {i}) AS {q(n)}"
+                          for i, n in enumerate(names, 1))
+        new = self._same(rel, f"SELECT * EXCLUDE ({q(col)}), {parts} FROM {q(rel.cte)}", "split")
+        new.known = (rel.known - {col}) | set(names)
+        new.kinds = {**{k: v for k, v in rel.kinds.items() if k != col}, **{n: "text" for n in names}}
+        return new
+
+    def f_Table_CombineColumns(self, args, scope, main, qname):
+        rel = self._src_arg(args, scope, main, qname)
+        cols = self._str_list(args[1])
+        self._use(rel, cols, "CombineColumns", main)
+        delim = self._delimiter(args[2], "Combiner.CombineTextByDelimiter")
+        name = self._const_str(args[3])
+        joined = f"concat_ws({lit(delim)}, {', '.join(f'CAST({q(c)} AS VARCHAR)' for c in cols)})"
+        new = self._same(rel, f"SELECT * EXCLUDE ({', '.join(q(c) for c in cols)}), {joined} AS {q(name)} FROM {q(rel.cte)}", "combine_cols")
+        new.known = (rel.known - set(cols)) | {name}
+        new.kinds = {**{k: v for k, v in rel.kinds.items() if k not in cols}, name: "text"}
+        return new
+
     _KINDS = {"JoinKind.LeftOuter": "LEFT", "JoinKind.Inner": "INNER", "JoinKind.RightOuter": "RIGHT",
               "JoinKind.FullOuter": "FULL"}
 
@@ -754,6 +870,10 @@ class Expr:
             return repr(v), "num"
         if t == "id":
             nm = n["name"]
+            if nm not in bind and nm != "_":
+                const = self.tr.constant(nm)
+                if const is not None:
+                    return self.sql(const, bind)
             if nm == "_" or nm in bind:
                 if nm in bind and bind[nm] == "*row*":
                     raise Unsupported("a whole-row reference (_) cannot be translated")
@@ -796,19 +916,19 @@ class Expr:
 
     def binary(self, n, bind):
         op = n["op"]
-        l, lk = self.sql(n["l"], bind)
-        r, rk = self.sql(n["r"], bind)
+        left, lk = self.sql(n["l"], bind)
+        right, rk = self.sql(n["r"], bind)
         if op in ("and", "or"):
-            return f"({self.boolean(l, lk)} {op.upper()} {self.boolean(r, rk)})", "bool"
+            return f"({self.boolean(left, lk)} {op.upper()} {self.boolean(right, rk)})", "bool"
         if op == "&":
-            return f"({self.text(l, lk)} || {self.text(r, rk)})", "text"
+            return f"({self.text(left, lk)} || {self.text(right, rk)})", "text"
         if op in ("+", "-", "*", "/"):
             if op == "+" and "date" in (lk, rk):
                 raise Unsupported("date arithmetic: use Date.AddDays / Date.AddMonths")
-            return f"({self.num(l, lk)} {op} {self.num(r, rk)})", "num"
+            return f"({self.num(left, lk)} {op} {self.num(right, rk)})", "num"
         # comparisons
         if op in ("=", "<>"):
-            for side, other, k in ((n["l"], r, rk), (n["r"], l, lk)):
+            for side, other, k in ((n["l"], right, rk), (n["r"], left, lk)):
                 if side["t"] == "lit" and side["kind"] == "null":
                     return f"({other} IS {'NOT ' if op == '<>' else ''}NULL)", "bool"
         known = {lk, rk} - {"unknown"}
@@ -817,7 +937,7 @@ class Expr:
             raise Unsupported("comparison between different value types")
         conv = {"num": self.num, "date": self.date, "bool": self.boolean, "text": self.text}[kind]
         sqlop = {"=": "=", "<>": "<>", "<": "<", ">": ">", "<=": "<=", ">=": ">="}[op]
-        return f"({conv(l, lk)} {sqlop} {conv(r, rk)})", "bool"
+        return f"({conv(left, lk)} {sqlop} {conv(right, rk)})", "bool"
 
     def call(self, n, bind):
         if n["fn"]["t"] != "id":
@@ -827,7 +947,9 @@ class Expr:
         T = lambda i: self.text(*S(i))
         N = lambda i: self.num(*S(i))
         D = lambda i: self.date(*S(i))
-        argc = lambda *ok: len(a) in ok or (_ for _ in ()).throw(Unsupported(f"{fn} called with {len(a)} arguments"))
+        def argc(*ok):
+            if len(a) not in ok:
+                raise Unsupported(f"{fn} called with {len(a)} arguments")
         if fn == "Text.Upper": argc(1); return f"upper({T(0)})", "text"
         if fn == "Text.Lower": argc(1); return f"lower({T(0)})", "text"
         if fn == "Text.Proper": argc(1); return f"sp_proper(lower({T(0)}))", "text"
@@ -923,6 +1045,36 @@ def stage_value(v):
     if isinstance(v, float) and v.is_integer():
         return str(int(v))
     return str(v)
+
+
+def sheet_columns(header, inputs: list[str], mapping: dict, norm_cells: list[str], dynamic: bool):
+    """Which sheet columns to stage: ``[(column name, sheet column index)]``.
+
+    The mapped input columns, plus (when the pipeline unpivots "other columns") every remaining named column of the
+    sheet under its own header text, so the steps see the same columns Power Query would.
+    """
+    from .inspect_excel import cell_text
+    used, cols = set(), []
+    for name in inputs:
+        for i, h in enumerate(norm_cells):
+            if mapping.get(h) == name and i not in used:
+                used.add(i)
+                cols.append((name, i))
+                break
+        else:
+            cols.append((name, None))
+    if dynamic:
+        taken = {n.lower() for n in inputs}
+        for i, cell in enumerate(header):
+            text = cell_text(cell)
+            if i in used or not text:
+                continue
+            name, n = text, 2
+            while name.lower() in taken:
+                name, n = f"{text}_{n}", n + 1
+            taken.add(name.lower())
+            cols.append((name, i))
+    return cols
 
 
 def stage_table(cur, columns: list[str], rows: list[tuple]) -> None:

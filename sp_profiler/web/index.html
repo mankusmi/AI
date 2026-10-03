@@ -35,10 +35,19 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
   <div class="scroll"><ul class="fs" id="fslist"></ul></div>
   <div style="margin-top:.6rem;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
    <button class="b p" id="pfolder">Profile this folder (recursive)</button><button class="b" id="pfiles">Profile ticked files</button>
-   <label class="mute"><input type="checkbox" id="store" checked> keep file bytes in DuckDB</label></div></div>
+   <label class="mute"><input type="checkbox" id="store" checked> keep file bytes</label></div>
+  <details style="margin-top:.6rem"><summary class="mute">More options</summary>
+   <div style="display:grid;gap:.4rem;margin-top:.4rem">
+    <input type="text" id="blobdir" placeholder="store file bytes in this folder instead of inside DuckDB (optional)">
+    <label class="mute">Files inspected in parallel <input type="text" id="workers" value="" placeholder="auto" style="width:5rem"></label>
+    <label class="mute"><input type="checkbox" id="hidden"> include hidden sheets</label>
+    <label class="mute"><input type="checkbox" id="exactrows"> count data rows exactly (slower)</label>
+    <label class="mute"><input type="checkbox" id="refresh"> re-inspect every file (otherwise unchanged files are reused)</label></div></details></div>
  <div class="card"><h2>or SharePoint (opens browser sign-in)</h2>
   <input type="text" id="spurl" placeholder="https://contoso.sharepoint.com/sites/Claims" style="margin-bottom:.4rem">
   <div style="display:flex;gap:.4rem;margin-bottom:.5rem"><input type="text" id="splib" value="Documents"><input type="text" id="spfolder" placeholder="folder inside library (optional)"></div>
+  <details style="margin-bottom:.5rem"><summary class="mute">Use my own app registration (if sign-in is blocked)</summary>
+   <input type="text" id="sptenant" placeholder="tenant id (optional)" style="margin:.3rem 0"><input type="text" id="spclient" placeholder="client (application) id"></details>
   <button class="b p" id="psp">Profile SharePoint folder</button>
   <h2 style="margin-top:1rem">Progress</h2><div class="prog"><i id="pbar" style="width:0"></i></div><div id="pmsg" class="mute mono" style="margin-top:.4rem;word-break:break-all"></div><div id="pres"></div></div></div>
  <div class="card"><h2>Layouts found</h2><div id="layouts" class="scroll"></div></div>
@@ -78,6 +87,7 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
 </main>
 <script>
 const TOKEN="__TOKEN__";
+try{history.replaceState(null,"","/")}catch(e){}
 const $=s=>document.querySelector(s);
 function h(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(k==="on")for(const[ev,f]of Object.entries(v))e.addEventListener(ev,f);else if(k==="class")e.className=v;else if(v!==false&&v!=null)e.setAttribute(k,v===true?"":v)}
  for(const c of kids.flat())if(c!=null&&c!==false)e.append(c.nodeType?c:document.createTextNode(String(c)));return e}
@@ -102,12 +112,13 @@ function fsBrowser(listSel,pathSel,{onFile,ticks}){let cur="";
  return{go,cur:()=>cur}}
 const fb=fsBrowser("#fslist","#fspath",{ticks:true});
 $("#fsgo").onclick=()=>fb.go($("#fspath").value);$("#fsall").onchange=()=>fb.go(fb.cur());
-async function startProfile(body){body.store_content=$("#store").checked;$("#pres").textContent="";
+async function startProfile(body){body.store_content=$("#store").checked;body.blob_dir=$("#blobdir").value.trim();body.workers=parseInt($("#workers").value)||0;
+ body.include_hidden=$("#hidden").checked;body.exact_rows=$("#exactrows").checked;body.refresh=$("#refresh").checked;$("#pres").textContent="";
  try{const{job}=await api("/api/profile/start",body);const j=await pollJob(job,"#pbar","#pmsg");
- $("#pres").replaceChildren(j.status==="done"?h("div",{class:"ok"},"Done: "+JSON.stringify(j.result.summary)):h("div",{class:"bad"},j.error));refreshState();loadLayouts()}catch(e){$("#pres").replaceChildren(h("div",{class:"bad"},e.message))}}
+ const sm=j.result?.summary||{};$("#pres").replaceChildren(j.status==="done"?h("div",{class:sm.files_with_warnings?"warn":"ok"},`Done: ${sm.inspected_files} Excel files inspected${sm.reused_files?` (${sm.reused_files} unchanged, reused)`:""} · ${sm.distinct_layouts} layouts · ${JSON.stringify(sm.status_counts)}`+(sm.files_with_warnings?` · ${sm.files_with_warnings} file(s) with warnings (see files.warnings)`:"")):h("div",{class:"bad"},j.error));refreshState();loadLayouts()}catch(e){$("#pres").replaceChildren(h("div",{class:"bad"},e.message))}}
 $("#pfolder").onclick=()=>startProfile({folder:fb.cur()});
 $("#pfiles").onclick=()=>{const files=[...document.querySelectorAll("#fslist input:checked")].map(i=>i.dataset.p);files.length?startProfile({files}):alert("Tick some files first")};
-$("#psp").onclick=()=>startProfile({sharepoint:{site_url:$("#spurl").value.trim(),library:$("#splib").value.trim()||"Documents",folder:$("#spfolder").value.trim()}});
+$("#psp").onclick=()=>startProfile({sharepoint:{site_url:$("#spurl").value.trim(),library:$("#splib").value.trim()||"Documents",folder:$("#spfolder").value.trim(),tenant_id:$("#sptenant").value.trim(),client_id:$("#spclient").value.trim()}});
 function table(cols,rows){return h("table",{},h("thead",{},h("tr",{},cols.map(c=>h("th",{},c)))),h("tbody",{},rows.map(r=>h("tr",{},r.map(c=>h("td",{},c==null?h("span",{class:"mute"},"∅"):c))))))}
 async function loadLayouts(){const l=await api("/api/layouts");$("#layouts").replaceChildren(l.length?table(["Layout","Files","Sheets","Cols","Headers","Example"],l.map(x=>[x.layout_hash,x.files,x.sheets,x.norm_headers.length,x.headers.join(" | "),x.example])):h("div",{class:"mute",style:"padding:.5rem"},"Nothing profiled yet."))}
 // ---------- dataflow
@@ -189,10 +200,10 @@ async function runSql(){$("#sqlmsg").textContent="running…";const sql=$("#sqlt
   $("#result").replaceChildren(r.columns.length?table(r.columns,r.rows):h("div",{style:"padding:.5rem"},"OK"));if($("#allow").checked)loadSchema()}
  catch(e){$("#sqlmsg").textContent=e.message;$("#sqlmsg").className="bad"}}
 $("#run").onclick=runSql;$("#sqltext").addEventListener("keydown",e=>{if(e.ctrlKey&&e.key==="Enter")runSql()});
-$("#csv").onclick=async()=>{const r=await fetch("/api/sql_csv",{method:"POST",headers:{"X-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({sql:$("#sqltext").value})});
+$("#csv").onclick=async()=>{const r=await fetch("/api/sql_csv",{method:"POST",headers:{"X-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({sql:$("#sqltext").value,allow_write:$("#allow").checked})});
  if(!r.ok)return alert((await r.json()).error);const a=h("a",{href:URL.createObjectURL(await r.blob()),download:"query.csv"});a.click()};
 $("#prof").onclick=async()=>{$("#profcard").style.display="block";$("#profile").replaceChildren(h("div",{style:"padding:.5rem"},"Profiling…"));
- try{const p=await api("/api/profile-data",{sql:$("#sqltext").value});$("#proftitle").textContent=`Profile · ${fmt(p.rows)} rows · ${p.columns.length} columns`;
+ try{const p=await api("/api/profile-data",{sql:$("#sqltext").value});$("#proftitle").textContent=`Profile · ${fmt(p.rows)} rows · ${p.columns.length} columns`+(p.top_sampled?" · top values from a sample":"");
   $("#profile").replaceChildren(table(["Column","Type","Nulls","Distinct","Min","Max","Mean / avg len","Std","Median","Top values"],p.columns.map(c=>c.skipped?[c.name,c.type,"skipped"]:[c.name,c.type,
    h("div",{},fmt(c.nulls)+" ("+c.null_pct+"%)",h("div",{class:"bar n"},h("i",{style:`width:${c.null_pct}%`}))),fmt(c.distinct)+" ("+c.distinct_pct+"%)",c.min,c.max,c.mean!=null?fmt(c.mean):c.avg_len!=null?fmt(c.avg_len)+" chars":"",c.std!=null?fmt(c.std):"",c.median!=null?fmt(c.median):"",
    (c.top||[]).map(t=>h("div",{},h("span",{class:"mono"},t.value.length>40?t.value.slice(0,40)+"…":t.value)," ",h("span",{class:"mute"},fmt(t.count)+" · "+t.pct+"%")))])))}

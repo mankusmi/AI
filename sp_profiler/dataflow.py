@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 from .inspect_excel import normalise_header
@@ -79,6 +78,13 @@ def parse_model_json(raw: bytes | str) -> dict:
 
 def extract_m_queries(document: str) -> dict[str, str]:
     """Split the Power Query section document into {query name: M source}."""
+    from .mparse import MParseError, split_shared_queries
+    try:
+        found = split_shared_queries(document or "")
+        if found:
+            return found
+    except MParseError:
+        pass                                    # unusual syntax: fall back to the line-based split below
     out: dict[str, str] = {}
     for chunk in re.split(r"(?m)^shared\s+", document or "")[1:]:
         m = re.match(r'(#"(?:[^"]|"")+"|[A-Za-z_][\w.]*)\s*=\s*(.*)', chunk, re.DOTALL)
@@ -110,11 +116,36 @@ def store_dataflow(con, parsed: dict, source_file: str = "") -> tuple[str, bool]
             con.executemany("INSERT INTO dataflow_attributes VALUES (?, ?, ?, ?, ?, ?)",
                             [[dataflow_id, e["name"], a["position"], a["name"], a["data_type"], a["description"]]
                              for a in e["attributes"]])
+        parsed["carried"] = _carry_forward(con, dataflow_id, parsed["name"])
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
         raise
     return dataflow_id, True
+
+
+def _carry_forward(con, new_id: str, name: str) -> dict:
+    """A re-imported dataflow (same name, new content) inherits lookup bindings and entity settings from the previous version."""
+    prev = con.execute("SELECT dataflow_id FROM dataflows WHERE name = ? AND dataflow_id <> ? "
+                       "ORDER BY imported_utc DESC LIMIT 1", [name, new_id]).fetchone()
+    if not prev:
+        return {"from": None, "bindings": 0, "settings": 0}
+    old = prev[0]
+    b = con.execute("INSERT INTO query_bindings SELECT ?, query_name, table_name FROM query_bindings WHERE dataflow_id = ? "
+                    "AND query_name IN (SELECT name FROM dataflow_queries WHERE dataflow_id = ?) RETURNING 1",
+                    [new_id, old, new_id]).fetchall()
+    s = con.execute("UPDATE entity_transforms SET dataflow_id = ? WHERE dataflow_id = ? "
+                    "AND entity IN (SELECT entity FROM dataflow_entities WHERE dataflow_id = ?) RETURNING 1",
+                    [new_id, old, new_id]).fetchall()
+    return {"from": old, "bindings": len(b), "settings": len(s)}
+
+
+def attribute_problems_of(parsed: dict) -> list[str]:
+    from .mapping_load import attribute_problems
+    out = []
+    for e in parsed["entities"]:
+        out += [f"{e['name']}: {p}" for p in attribute_problems([{"name": a["name"]} for a in e["attributes"]])]
+    return out
 
 
 def _compact(s: str) -> str:
