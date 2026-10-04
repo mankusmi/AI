@@ -228,3 +228,17 @@ then merge everything with a final dataflow) use the **5 · Pipeline** tab, or `
 * A dataflow that reads another dataflow (linked entity) gets that stage's table as its source. If one query reads several linked entities, all of
   them receive the same input (the stage reports a warning); bind extra inputs as lookups to the `__<coverholder>` views instead.
 * Stage 1 mappings are stored per layout and per entity name; give the dataflow-1 entity a name that is not used by a stage-1 entity in another dataflow.
+
+### Different dataflows per coverholder, one shared mapping workbook
+
+* Leave a stage's default dataflow as "— default: none (per coverholder) —" and choose dataflow 1 / dataflow 2 for each coverholder in the
+  coverholder table. All coverholders still write to the stage's one output table (partitioned by `_coverholder`). A coverholder with no
+  dataflow at a stage gets an explicit error; coverholders a merge dataflow does not read are listed as a warning. "Match by name" fills
+  the table by matching dataflow/entity names to coverholder names.
+* A shared lookup workbook (e.g. risk code → class) is imported once. Every coverholder's dataflow 2 that reads it is **matched by file name**,
+  even through different UNC/URL paths and query names; the lookup query's own steps (Trim, Upper, ...) run over it first.
+* Untouched attributes of an open schema pass through from the sheet unchanged.
+* The merge dataflow's linked sources (one per coverholder's dataflow-2 entity) are matched automatically to that coverholder's output view
+  `<output>__<coverholder>` by entity name, then by coverholder name. Anything that cannot be matched is shown on the Map & load tab
+  ("Sources this dataflow reads"); **Bind** it explicitly (`Query::Step`).
+* Limit: stage 1 entities that share a name across dataflows share layout mappings; give them distinct names.

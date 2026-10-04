@@ -85,11 +85,14 @@ def save_pipeline(con, name: str, stages: list[dict], overrides: Optional[list[d
     if "merge" in kinds and "stage" in kinds[kinds.index("merge"):]:
         raise PipelineError("Merge stages must come after all per-coverholder stages")
     pipeline_id = pipeline_id or uuid.uuid4().hex[:10]
+    overridden = {int(o["position"]) for o in (overrides or []) if o.get("coverholder") and o.get("dataflow_id") and o.get("entity")}
     owned = {r[0] for r in con.execute("SELECT output_table FROM pipeline_stages WHERE pipeline_id = ?", [pipeline_id]).fetchall()}
     rows, seen_tables, seen_names = [], set(), set()
     for pos, s in enumerate(stages):
-        dfid, ent = s.get("dataflow_id"), s.get("entity")
-        if not con.execute("SELECT 1 FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ?", [dfid, ent]).fetchone():
+        dfid, ent = s.get("dataflow_id") or "", s.get("entity") or ""
+        if not dfid and not ent and s["kind"] != "merge" and pos in overridden:
+            pass                       # no default: every coverholder of this stage has its own dataflow
+        elif not con.execute("SELECT 1 FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ?", [dfid, ent]).fetchone():
             raise PipelineError(f"Stage {pos + 1}: entity {ent!r} not found in the chosen dataflow")
         sname = (s.get("name") or "").strip() or f"{s['kind']} {pos + 1}"
         if sname.lower() in seen_names:
@@ -97,7 +100,7 @@ def save_pipeline(con, name: str, stages: list[dict], overrides: Optional[list[d
         seen_names.add(sname.lower())
         out = (s.get("output_table") or "").strip()
         if not out:
-            out = ml.table_for(con, ent) if s["kind"] == "files" else f"df_{slug(sname)}"
+            out = ml.table_for(con, ent) if (s["kind"] == "files" and ent) else f"df_{slug(sname)}"
         _check_output_table(con, out, owned)
         if out in seen_tables:
             raise PipelineError(f"Two stages write to {out!r}")
@@ -186,7 +189,9 @@ def _version(con, pipe: dict, position: int, coverholder: Optional[str]) -> str:
     """When this stage's output (for one coverholder, or overall) last changed: what downstream stages depend on."""
     stage = pipe["stages"][position]
     if stage["kind"] == "files":
-        ents = {stage["entity"]} | {o["entity"] for o in pipe["overrides"] if o["position"] == position}
+        ents = ({stage["entity"]} if stage["entity"] else set()) | {o["entity"] for o in pipe["overrides"] if o["position"] == position}
+        if not ents:
+            return "none"
         ph = ", ".join("?" for _ in ents)
         sql = f"SELECT max(finished_utc) FROM load_log WHERE status = 'ok' AND entity IN ({ph})"
         args = list(ents)
@@ -226,6 +231,9 @@ def _make_view(con, table: str, coverholder: str) -> None:
 # ----------------------------------------------------------------------------- stage execution
 def _run_files_stage(con, pipe, stage, coverholder, force, progress) -> dict:
     dfid, ent = _target(con, pipe, stage, coverholder)
+    if not dfid or not ent:
+        return {"status": "error", "detail": f"No dataflow is chosen for {coverholder} at stage {stage['name']!r}. Choose one in the "
+                                              "coverholder table (or give the stage a default)."}
     plan = tf.resolve(con, dfid, ent)
     kind = "input" if plan["mode"] == "m" else "attribute"
     if plan["use_m"] and plan["mode"] != "m":
@@ -252,15 +260,69 @@ def _run_files_stage(con, pipe, stage, coverholder, force, progress) -> dict:
             "detail": f"{res['sheets_loaded']} sheet(s) loaded, {res['replaced_rows']} earlier rows replaced" if res["sheets_loaded"] else "nothing new"}
 
 
+def merge_resolver_for(con, dataflow_id: str, entity: str):
+    """The source resolver a saved pipeline uses for this dataflow entity when it is a merge stage, else None (no side effects)."""
+    r = con.execute("SELECT pipeline_id, input_stage FROM pipeline_stages WHERE kind = 'merge' AND dataflow_id = ? AND entity = ? LIMIT 1",
+                    [dataflow_id, entity]).fetchone()
+    if not r:
+        return None
+    pipe = get_pipeline(con, r[0])
+    upstream = pipe["stages"][r[1]]
+    if not con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [upstream["output_table"]]).fetchone():
+        return None
+    chs = [x[0] for x in con.execute(f"SELECT DISTINCT coalesce(_coverholder, '') FROM {qi(upstream['output_table'])} ORDER BY 1").fetchall() if x[0]]
+    return _merge_resolver(con, pipe, upstream, chs, create_views=False)[0]
+
+
+def _merge_resolver(con, pipe, upstream, chs: list[str], create_views: bool = True):
+    """Match each linked source of a merge dataflow to one coverholder's rows of the previous stage's table.
+
+    By the linked entity's name (the coverholder's dataflow-2 entity), then by the coverholder's name appearing in the step
+    or entity name. Returns the per-coverholder view; ambiguous or unmatched sources get no table (and list candidates).
+    """
+    cands = []
+    for ch in chs:
+        _, ent = _target(con, pipe, upstream, ch)
+        if create_views:
+            _make_view(con, upstream["output_table"], ch)
+        cands.append({"ch": ch, "entity": (ent or "").lower(), "view": f"{upstream['output_table']}__{slug(ch)}"})
+
+    def named(c, texts) -> bool:
+        s = slug(c["ch"])
+        return bool(s) and any((re.search(rf"(^|_){re.escape(s)}(_|$)", slug(x)) or (len(s) >= 4 and s in slug(x))) for x in texts if x)
+
+    def resolver(src: dict):
+        ents = {e.lower() for e in src["hints"].get("entity", [])}
+        by_entity = [c for c in cands if c["entity"] and c["entity"] in ents]
+        if len(by_entity) == 1:
+            return by_entity[0]["view"]
+        pool = by_entity or cands
+        by_name = [c for c in pool if named(c, [src["step"]] + src["hints"].get("entity", []))]
+        if len(by_name) == 1:
+            return by_name[0]["view"]
+        src["candidates"] = [c["ch"] for c in (by_name or by_entity)]
+        return None
+    return resolver, cands
+
+
 def why_not_ready(plan: dict) -> str:
     """Plain-language reason a dataflow cannot run yet: unbound lookups, untranslated steps, parse errors."""
     p = plan["pipeline"]
     parts = []
-    missing = [n for n, r in p.references.items() if r.get("kind") == "missing"]
+    missing = {n: r for n, r in p.references.items() if r.get("kind") == "missing" and r.get("reason") != "unknown query"}
     if missing:
-        parts.append(f"lookup(s) {', '.join(missing)} need data: import the lookup file and bind each one to its table "
-                     "(Map & load tab, Lookups)")
-    bad = [f"{s['name']} ({s['error']})" for s in p.steps if not s["ok"] and "needs data" not in s["error"]]
+        names = ", ".join(f"{n} (reads {', '.join(r['files'])})" if r.get("files") else n for n, r in missing.items())
+        parts.append(f"lookup(s) {names} need data: import that file as a lookup table (Map & load tab, Lookups; it is then matched "
+                     "by file name automatically) or bind the lookup to a table")
+    for s in p.sources:
+        if s.get("mode") == "missing":
+            ent = s["hints"].get("entity")
+            cands = s.get("candidates") or []
+            parts.append(f"linked source {s['step']!r}" + (f" (entity {ent[0]!r})" if ent else "")
+                         + (f" matches several coverholders ({', '.join(cands)})" if cands else " could not be matched to a coverholder's output")
+                         + ": bind it to the right table or view in the dataflow's Sources list")
+    bad = [f"{s['name']} ({s['error']})" for s in p.steps
+           if not s["ok"] and "needs data" not in s["error"] and "no table bound" not in s["error"]]
     if bad:
         parts.append("steps that cannot be translated: " + "; ".join(bad[:3]))
     if p.error and not missing:
@@ -272,16 +334,26 @@ def _run_derived_stage(con, pipe, stage, coverholder: Optional[str], force, run_
     """Apply a dataflow to the previous stage's output. ``coverholder=None`` means all coverholders (merge)."""
     ch = coverholder or ""
     dfid, ent = _target(con, pipe, stage, ch)
-    plan = tf.resolve(con, dfid, ent, ch)
+    if not dfid or not ent:
+        return {"status": "error", "detail": f"No dataflow is chosen for {ch or 'this stage'} at stage {stage['name']!r}. Choose one in the "
+                                              "coverholder table (or give the stage a default)."}
+    upstream = pipe["stages"][stage["input_stage"]]
+    resolver, cands = None, []
+    if coverholder is None:                     # merge: linked sources are matched to each coverholder's rows
+        up_exists = con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [upstream["output_table"]]).fetchone()
+        merge_chs = [r[0] for r in con.execute(f"SELECT DISTINCT coalesce(_coverholder, '') FROM {qi(upstream['output_table'])} "
+                                               "ORDER BY 1").fetchall() if r[0]] if up_exists else []
+        resolver, cands = _merge_resolver(con, pipe, upstream, merge_chs)
+    plan = tf.resolve(con, dfid, ent, ch, resolver)
     if plan["mode"] != "m":
         return {"status": "error", "detail": f"The dataflow for {ent!r} is not ready: {why_not_ready(plan)}. You can also supply SQL "
                                               "or accept a partial translation on the Map & load tab."}
-    upstream = pipe["stages"][stage["input_stage"]]
     up_table = upstream["output_table"]
     if not con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [up_table]).fetchone():
         return {"status": "blocked", "detail": f"Upstream table {up_table!r} does not exist yet"}
     up_cols = [r[0] for r in con.execute(f"SELECT column_name FROM (DESCRIBE {qi(up_table)})").fetchall()]
-    missing = [c for c in plan["inputs"] if c.lower() not in {u.lower() for u in up_cols}]
+    passthrough = {c.lower() for c in plan["pipeline"].passthrough}          # untouched attributes may simply be absent: NULL
+    missing = [c for c in plan["inputs"] if c.lower() not in {u.lower() for u in up_cols} and c.lower() not in passthrough]
     if missing:
         return {"status": "error", "detail": f"The steps read column(s) {missing} that the previous stage ({upstream['name']!r}) does not "
                                               f"produce. Available: {[c for c in up_cols if not c.startswith('_')]}"}
@@ -292,8 +364,12 @@ def _run_derived_stage(con, pipe, stage, coverholder: Optional[str], force, run_
     fp = _fingerprint(parts)
     st = _state(con, pipe["pipeline_id"], stage["position"], ch)
     exists = con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [stage["output_table"]]).fetchone()
+    unused = [c["ch"] for c in cands if len(p.sources) >= 2 and c["view"] not in {s["table"] for s in p.sources}]
+    notes = p.warnings + ([f"coverholder(s) not read by this dataflow: {', '.join(unused)}"] if unused else [])
     if st and st[0] == fp and exists and not force:
-        return {"status": "up_to_date", "detail": "inputs unchanged", "warnings": p.warnings}
+        if coverholder is not None:
+            _make_view(con, stage["output_table"], coverholder)
+        return {"status": "up_to_date", "detail": "inputs unchanged", "warnings": notes}
     where, args = ("WHERE coalesce(_coverholder, '') = ?", [ch]) if coverholder is not None else ("", [])
     order = "ORDER BY coalesce(_coverholder, ''), coalesce(_source_id, ''), coalesce(_sheet, ''), coalesce(_excel_row, 0)"
     ensure_macros(con)
@@ -338,7 +414,7 @@ def _run_derived_stage(con, pipe, stage, coverholder: Optional[str], force, run_
     _save_state(con, pipe["pipeline_id"], stage["position"], ch, fp, len(buf))
     if coverholder is not None:
         _make_view(con, stage["output_table"], coverholder)
-    return {"status": "loaded", "rows": len(buf), "warnings": p.warnings + ([f"{bad} cell(s) could not be converted"] if bad else []),
+    return {"status": "loaded", "rows": len(buf), "warnings": notes + ([f"{bad} cell(s) could not be converted"] if bad else []),
             "detail": f"{len(buf)} rows written"}
 
 

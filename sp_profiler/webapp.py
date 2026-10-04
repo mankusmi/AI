@@ -217,11 +217,21 @@ class App:
                 "needs": need, "available": [c for c in have if not c.startswith("_")],
                 "missing": [c for c in need if c.lower() not in {h.lower() for h in have}] if have else []}
 
+    @staticmethod
+    def assigned_coverholders(cur, dataflow_id: str, entity: str) -> list[str]:
+        """Coverholders that a saved pipeline's first stage runs through this dataflow entity (empty = no restriction known)."""
+        rows = cur.execute("SELECT o.coverholder FROM pipeline_overrides o JOIN pipeline_stages s USING (pipeline_id, position) "
+                           "WHERE s.kind = 'files' AND o.dataflow_id = ? AND o.entity = ?", [dataflow_id, entity]).fetchall()
+        if cur.execute("SELECT 1 FROM pipeline_stages WHERE kind = 'files' AND dataflow_id = ? AND entity = ?", [dataflow_id, entity]).fetchone():
+            return []                                   # it is a stage default: applies to everyone not overridden
+        return sorted({r[0] for r in rows})
+
     def mapping(self, dataflow_id: str, entity: str) -> dict:
         cur = self.cur()
         stage = self.stage_use(cur, dataflow_id, entity)
         if stage:
             return {"attributes": [], "layouts": [], "table": stage["upstream_table"], "kind": "stage", "mode": "stage", "stage": stage}
+        assigned = self.assigned_coverholders(cur, dataflow_id, entity)
         kind, targets, plan = self.mapping_targets(cur, dataflow_id, entity)
         saved: dict[str, dict] = {}
         for lh, nh, a in cur.execute("SELECT layout_hash, norm_header, attribute FROM column_mappings "
@@ -238,16 +248,17 @@ class App:
             lay["ignored"] = lay["layout_hash"] in ignored
             out.append(lay)
         return {"attributes": targets, "layouts": out, "table": ml.table_for(cur, entity), "kind": kind,
-                "mode": plan["mode"]}
+                "mode": plan["mode"], "assigned_coverholders": assigned}
 
     def transform(self, dataflow_id: str, entity: str) -> dict:
         cur = self.cur()
-        plan = tf.resolve(cur, dataflow_id, entity)
+        plan = tf.resolve(cur, dataflow_id, entity, "", pl.merge_resolver_for(cur, dataflow_id, entity))
         p, st = plan["pipeline"], plan["settings"] or {}
         attrs = [r[0] for r in cur.execute("SELECT name FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ? ORDER BY position",
                                            [dataflow_id, entity]).fetchall()]
         info = {"steps": [{k: s.get(k, "") for k in ("query", "name", "func", "ok", "error", "cte")} for s in p.steps],
-                "inputs": p.inputs, "references": p.references, "translated": p.complete, "error": p.error,
+                "inputs": p.inputs, "references": {k: v for k, v in p.references.items() if not k.startswith("src:")},
+                "sources": p.sources, "translated": p.complete, "error": p.error,
                 "generated_sql": plan["generated_sql"], "status": plan["status"], "mode": plan["mode"],
                 "use_m": plan["use_m"], "explicit": bool(plan["settings"]), "override_sql": st.get("override_sql", ""),
                 "accept_partial": st.get("accept_partial", False), "extra_inputs": st.get("extra_inputs", []),
@@ -267,7 +278,7 @@ class App:
 
     def transform_preview(self, b: dict) -> dict:
         cur = self.cur()
-        plan = tf.resolve(cur, b["dataflow_id"], b["entity"])
+        plan = tf.resolve(cur, b["dataflow_id"], b["entity"], "", pl.merge_resolver_for(cur, b["dataflow_id"], b["entity"]))
         p = plan["pipeline"]
         step = b.get("step") or ""
         if step:

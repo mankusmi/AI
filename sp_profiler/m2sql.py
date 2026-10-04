@@ -156,6 +156,8 @@ class Pipeline:
     complete: bool = False
     error: str = ""
     warnings: list = field(default_factory=list)
+    passthrough: list = field(default_factory=list)   # attributes no step touches: they flow from the source unchanged
+    sources: list = field(default_factory=list)       # external sources the entity query reads and how each was satisfied
     source_kinds: set = field(default_factory=set)      # 'file' (Excel/CSV/SharePoint) and/or 'dataflow' (linked entity)
     dynamic_columns: bool = False        # UnpivotOtherColumns: every other sheet column must be staged, not just the inputs
 
@@ -170,12 +172,68 @@ SOURCE_FUNCS = ("Excel.", "Csv.", "File.", "Web.", "SharePoint.", "Folder.", "Az
 INLINE_FUNCS = ("#table", "Table.FromRows", "Table.FromRecords")
 
 
+EXT_RE = re.compile(r"\.(xlsx|xlsm|xls|csv)\s*$", re.I)
+
+
+def _walk(node):
+    """Every dict node of an AST (including those inside lists and tuples)."""
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _walk(v)
+    elif isinstance(node, (list, tuple)):
+        for v in node:
+            yield from _walk(v)
+
+
+def _ids_in(node) -> set:
+    return {n["name"] for n in _walk(node) if n.get("t") == "id"}
+
+
+def _basename(s: str) -> str:
+    from urllib.parse import unquote
+    return unquote(re.split(r"[\\/]", s.split("?")[0].rstrip("/\\"))[-1])
+
+
+def _source_hints(exprs) -> dict:
+    """What an external source's M mentions: file names, sheet/Item, linked entity, dataflow id, plain strings."""
+    h = {"files": [], "entity": [], "dataflow_id": [], "sheet": [], "strings": []}
+    for expr in exprs:
+        for n in _walk(expr):
+            if n.get("t") == "lit" and n.get("kind") == "str":
+                h["strings"].append(n["v"])
+                if EXT_RE.search(n["v"]):
+                    h["files"].append(_basename(n["v"]))
+            elif n.get("t") == "record":
+                for key, val in n["fields"]:
+                    if val.get("t") == "lit" and val.get("kind") == "str":
+                        k = key.lower()
+                        if k == "entity":
+                            h["entity"].append(val["v"])
+                        elif k == "dataflowid":
+                            h["dataflow_id"].append(val["v"])
+                        elif k == "item":
+                            h["sheet"].append(val["v"])
+                        elif k == "name" and EXT_RE.search(val["v"]):
+                            h["files"].append(val["v"])
+    return {k: list(dict.fromkeys(v)) for k, v in h.items()}
+
+
 class Translator:
     """Builds the CTE chain for one entity query, resolving lookups against other queries."""
 
     def __init__(self, queries: dict[str, str], bindings: dict[str, str] | None = None,
-                 entity_tables: dict[str, str] | None = None, date_order: str = "DMY"):
+                 entity_tables: dict[str, str] | None = None, date_order: str = "DMY",
+                 reference_index: dict | None = None, source_resolver=None):
         self.order = date_order
+        # lookup files imported as tables: file name (lower) -> [(table, sheet)]; matched against names found in the M code
+        self.reference_index = reference_index or {}
+        # callback(source dict) -> table for a linked source that has no explicit binding (the pipeline's merge stage)
+        self.source_resolver = source_resolver
+        self._analysis: dict[str, dict] = {}
+        self._source_cache: dict[tuple, Rel] = {}
+        self._lookup_used: dict[str, tuple] = {}
+        self._failed: dict[str, set] = {}
         self.query_src = queries
         self.queries: dict[str, dict] = {}
         self.parse_errors: dict[str, str] = {}
@@ -201,11 +259,14 @@ class Translator:
         return None
 
     # ---- public ----------------------------------------------------------------
-    def translate(self, entity: str) -> Pipeline:
+    def translate(self, entity: str, attributes: Optional[list[str]] = None) -> Pipeline:
+        """Translate ``entity``. ``attributes`` (its dataflow attributes) lets columns that no step mentions, but that
+        flow through to the output as in Power Query, be carried as inputs instead of silently loading as NULL."""
         self.p = Pipeline(entity)
         self._n = 0
         self._query_rels = {}
-        self._raw_used: set[str] = set()
+        self._source_cache = {}
+        self._lookup_used = {}
         self.p.ctes.append(("src", 'SELECT * FROM "_stg"'))
         if entity in self.parse_errors:
             self.p.error = f"Could not parse M: {self.parse_errors[entity]}"
@@ -216,6 +277,10 @@ class Translator:
         try:
             rel = self._run_query(entity, main=True)
             self.p.final = rel.cte if rel else self.p.final
+            if rel is not None and rel.open and attributes:        # an open schema keeps every source column
+                have = {k.lower() for k in rel.known} | {i.lower() for i in self.p.inputs}
+                self.p.passthrough = [a for a in attributes if a.lower() not in have and not a.startswith("_")]
+                self.p.inputs += self.p.passthrough
             self.p.complete = rel is not None and not self.p.error and all(s["ok"] for s in self.p.steps)
         except Unsupported as e:
             self.p.error = str(e)
@@ -270,6 +335,7 @@ class Translator:
                 ast = {"t": "let", "steps": [("Result", ast)], "in": {"t": "id", "name": "Result"}}
             scope: dict[str, Rel] = {}
             last: Optional[Rel] = None
+            self._failed[qname] = set()
             for name, expr in ast["steps"]:
                 func = self._head(expr)
                 rec = {"query": qname, "name": name, "func": func, "ok": True, "error": ""}
@@ -280,16 +346,19 @@ class Translator:
                     rec["cte"] = rel.cte
                 except (Unsupported, MParseError) as e:
                     rec.update(ok=False, error=str(e))
+                    self._failed[qname].add(name)
                     if not main:
                         raise Unsupported(f"lookup query {qname!r}, step {name!r}: {e}")
                 if main:
                     self.p.steps.append(rec)
             res = ast["in"]
             if res["t"] == "id" and res["name"] in scope:
-                return self._promote(scope[res["name"]], main)
+                return self._promote(scope[res["name"]], main, qname, res["name"])
             if main and res["t"] == "id":
                 self.p.error = self.p.error or f"Result step {res['name']!r} could not be translated"
-            return self._promote(last, main) if last else None
+            if self._failed[qname]:
+                return None                       # something failed: the last good step is not the query's result
+            return self._promote(last, main, qname) if last else None
         finally:
             self._resolving.pop()
             self._main_ctx = outer_ctx
@@ -301,49 +370,146 @@ class Translator:
         return {"item": "navigation", "field": "navigation", "id": "reference", "list": "list", "record": "record",
                 "lit": "literal"}.get(e["t"], e["t"])
 
-    def _promote(self, rel: Optional[Rel], main: bool) -> Optional[Rel]:
-        if rel is not None and rel.raw:
-            return self._src_rel(main)
+    # ---- external sources ---------------------------------------------------------------
+    def _raw_expr(self, e, raw: set) -> bool:
+        """Is this step expression an external source (or a navigation / row-skip of one)?"""
+        t = e["t"]
+        if t == "id":
+            return e["name"] in raw
+        if t in ("item", "field"):
+            return e["of"] is not None and self._raw_expr(e["of"], raw)
+        if t == "call" and e["fn"]["t"] == "id":
+            fn = e["fn"]["name"]
+            if fn.startswith(SOURCE_FUNCS):
+                return True
+            if fn in ("Table.Skip", "Table.RemoveFirstN") and e["args"] and self._raw_expr(e["args"][0], raw):
+                return True
+        return False
+
+    def _analyse(self, qname: str) -> dict:
+        """Which steps of a query are external sources, which of them the rest of the query actually reads, and what each mentions."""
+        if qname in self._analysis:
+            return self._analysis[qname]
+        ast = self.queries[qname]
+        if ast["t"] != "let":
+            ast = {"t": "let", "steps": [("Result", ast)], "in": {"t": "id", "name": "Result"}}
+        steps = dict(ast["steps"])
+        raw: list[str] = []
+        for name, expr in ast["steps"]:
+            if self._raw_expr(expr, set(raw)):
+                raw.append(name)
+        used: set[str] = set()
+        for name, expr in ast["steps"]:
+            if name not in raw:
+                used |= _ids_in(expr) & set(raw)
+        used |= _ids_in(ast["in"]) & set(raw)
+
+        def chain(n, seen=None):
+            seen = seen or set()
+            if n in seen:
+                return []
+            seen.add(n)
+            out = [steps[n]]
+            for ref in _ids_in(steps[n]) & set(raw):
+                out += chain(ref, seen)
+            return out
+        info = {"raw": raw, "consumed": [n for n in raw if n in used],
+                "hints": {n: _source_hints(chain(n)) for n in raw}}
+        self._analysis[qname] = info
+        return info
+
+    def _auto_reference(self, hints: dict):
+        """A lookup table imported from the file this source names (and the sheet it picks), if unambiguous."""
+        for f in hints["files"]:
+            cands = self.reference_index.get(f.lower(), [])
+            if hints["sheet"]:
+                sheet = [c for c in cands if (c[1] or "").lower() in {s.lower() for s in hints["sheet"]}]
+                cands = sheet or cands
+            if len({c[0] for c in cands}) == 1:
+                return cands[0][0], f
+        return None
+
+    def _source_rel(self, qname: str, name: Optional[str], main: bool) -> Rel:
+        """The relation for an external source: bound table, auto-matched table, or (single source of a stage) the stage input."""
+        key = (qname, name)
+        if key in self._source_cache:
+            return self._source_cache[key]
+        an = self._analyse(qname) if qname in self.queries else {"consumed": [], "hints": {}}
+        hints = an["hints"].get(name or "", {"files": [], "entity": [], "dataflow_id": [], "sheet": [], "strings": []})
+        table, mode, extra = None, None, {}
+        bound = self.bindings.get(f"{qname}::{name}") if name else None
+        if bound:
+            table, mode = bound, "bound"
+        elif not main and self.bindings.get(qname):
+            table, mode = self.bindings[qname], "bound"
+        elif not main:
+            auto = self._auto_reference(hints)
+            if auto:
+                table, mode, extra = auto[0], "auto", {"file": auto[1]}
+        elif len(an["consumed"]) >= 2 and self.source_resolver:
+            src = {"query": qname, "step": name, "hints": hints, "candidates": []}
+            table = self.source_resolver(src)
+            if table:
+                mode = "auto"
+            else:
+                extra = {"candidates": src["candidates"]}
+        if table:
+            rel = self._emit(f"source_{slug(name or qname)}", f"SELECT * FROM {q(table)}", open=True, has_row=False)
+            self._lookup_used[qname] = (table, mode == "auto", extra.get("file"))
+        elif main and len(an["consumed"]) < 2:
+            rel, mode = Rel("src", set(), True, from_src=True, has_row=True), "stage_input"       # the stage's input table
+        else:
+            if main:
+                self.p.sources.append({"query": qname, "step": name, "hints": hints, "table": None, "mode": "missing", **extra})
+            what = hints["files"] or hints["entity"] or ["data"]
+            raise Unsupported(f"{'source' if main else 'query'} {name or qname!r} reads {', '.join(what)} and has no table bound to it")
+        if main:
+            self.p.sources.append({"query": qname, "step": name, "hints": hints, "table": table, "mode": mode, **extra})
+            if table:
+                self.p.references[f"src:{qname}::{name}"] = {"kind": "binding", "table": table}
+        self._source_cache[key] = rel
         return rel
 
-    def _src_rel(self, main: bool) -> Rel:
-        if not main:
-            raise Unsupported("reads an external file/source")
-        return Rel("src", set(), True, from_src=True, has_row=True)
+    def _promote(self, rel: Optional[Rel], main: bool, qname: str, name: Optional[str] = None) -> Optional[Rel]:
+        if rel is not None and rel.raw:
+            return self._source_rel(qname, name, main)
+        return rel
 
     def _rel(self, e, scope, main, qname) -> Rel:
         """Evaluate an expression that must yield a table, as a Rel."""
         if e["t"] == "id":
             n = e["name"]
             if n in scope:
-                if scope[n].raw and main:
-                    self._raw_used.add(n)
-                    if len(self._raw_used) == 2:
-                        self.p.warnings.append("This query reads more than one external source; all of them are bound to the single "
-                                               "input of this stage, so a Table.Combine of them would repeat the same rows.")
-                return self._promote(scope[n], main)
+                return self._promote(scope[n], main, qname, n)
+            if n in self._failed.get(qname, ()):
+                raise Unsupported(f"depends on step {n!r}, which could not be translated")
             return self._resolve_query(n)
-        return self._promote(self._step(e, scope, main, qname), main)
+        return self._promote(self._step(e, scope, main, qname), main, qname)
 
     def _resolve_query(self, name: str) -> Rel:
         if name in self._query_rels:
             return self._query_rels[name]
-        if name in self.bindings:
-            rel = self._emit(f"ref_{name}", f"SELECT * FROM {q(self.bindings[name])}", open=True)
+        external = name in self.queries and bool(self._analyse(name)["consumed"])
+        if name in self.bindings and not external:         # a bound table replaces a query that has no external source
+            rel = self._emit(f"ref_{name}", f"SELECT * FROM {q(self.bindings[name])}", open=True, has_row=False)
             self.p.references[name] = {"kind": "binding", "table": self.bindings[name]}
         elif name in self.queries:
             try:
+                self._lookup_used.pop(name, None)
                 rel = self._run_query(name, main=False)
-                self.p.references[name] = {"kind": "query"}
+                used = self._lookup_used.get(name)       # the query's own steps run over the bound / matched lookup table
+                self.p.references[name] = ({"kind": "binding", "table": used[0], **({"auto": True, "file": used[2]} if used[1] else {})}
+                                           if used else {"kind": "query"})
             except Unsupported as e:
                 if name in self.entity_tables:
-                    rel = self._emit(f"ref_{name}", f"SELECT * FROM {q(self.entity_tables[name])}", open=True)
+                    rel = self._emit(f"ref_{name}", f"SELECT * FROM {q(self.entity_tables[name])}", open=True, has_row=False)
                     self.p.references[name] = {"kind": "entity_table", "table": self.entity_tables[name]}
                 else:
-                    self.p.references[name] = {"kind": "missing", "reason": str(e)}
+                    files = list(dict.fromkeys(f for h in self._analyse(name)["hints"].values() for f in h["files"]))
+                    self.p.references[name] = {"kind": "missing", "reason": str(e), "files": files}
                     raise Unsupported(f"lookup {name!r} needs data: {e}. Bind it to a table")
         elif name in self.entity_tables:
-            rel = self._emit(f"ref_{name}", f"SELECT * FROM {q(self.entity_tables[name])}", open=True)
+            rel = self._emit(f"ref_{name}", f"SELECT * FROM {q(self.entity_tables[name])}", open=True, has_row=False)
             self.p.references[name] = {"kind": "entity_table", "table": self.entity_tables[name]}
         else:
             self.p.references[name] = {"kind": "missing", "reason": "unknown query"}
@@ -429,7 +595,7 @@ class Translator:
     # ---- table functions ------------------------------------------------------------------
     def f_Table_PromoteHeaders(self, args, scope, main, qname):
         rel = self._rel_or_raw(args[0], scope, main, qname)
-        return self._promote(rel, main) if rel.raw else rel      # on a non-raw table: no-op
+        return self._promote(rel, main, qname, args[0]["name"] if args[0]["t"] == "id" else None) if rel.raw else rel   # no-op otherwise
 
     def f_Table_DemoteHeaders(self, args, scope, main, qname):
         raise Unsupported("Table.DemoteHeaders is not supported")

@@ -70,6 +70,7 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
  <div class="card"><div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center"><b>Dataflow / entity</b><select id="mdf"></select><select id="ment"></select>
   <span class="mute" id="mtable"></span></div></div>
  <div id="mtransform"></div>
+ <div id="mfilter" class="mute" style="margin:.2rem 0 .6rem"></div>
  <div id="mlayouts"></div>
  <div class="card" id="mloadcard"><h2>Append mapped rows to DuckDB</h2><p class="mute">Loads every stored sheet whose layout has a saved mapping and that hasn't been loaded yet (same content + sheet is never loaded twice unless forced).</p>
   <button class="b p" id="mload">Load / append now</button> <label class="mute"><input type="checkbox" id="mforce"> force reload (replaces rows already loaded from those sheets)</label>
@@ -85,7 +86,9 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
   <div class="mute" style="margin-bottom:.4rem">Stage 1 applies a dataflow to each coverholder's files. Later stages apply a dataflow to the previous stage's output, per coverholder; a <b>merge</b> stage runs once over all coverholders when they are done.</div>
   <div id="pstages"></div>
   <div style="margin-top:.5rem;display:flex;gap:.5rem;align-items:center"><select id="paddkind"><option value="stage">per-coverholder stage</option><option value="merge">merge stage</option></select><button class="b" id="padd">Add stage</button></div>
-  <details style="margin-top:.6rem"><summary class="mute">Different dataflow for one coverholder (optional)</summary><div id="povr" style="margin-top:.4rem"></div><button class="b" id="povradd" style="margin-top:.3rem">Add override</button></details></div>
+  <div style="margin-top:.8rem"><b>Dataflow per coverholder</b> <span class="mute">(leave a stage's default empty above when every coverholder has its own)</span>
+   <button class="b" id="pmatch" style="margin-left:.6rem">Match by name</button><span id="pmatchmsg" class="mute" style="margin-left:.5rem"></span>
+   <div id="povr" class="scroll" style="margin-top:.4rem"></div></div></div>
  <div class="card"><h2>Run</h2>
   <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center"><button class="b p" id="prun">Run pipeline</button>
    <label class="mute"><input type="checkbox" id="pforce"> redo everything (ignore "unchanged")</label>
@@ -168,7 +171,7 @@ async function loadTransform(){const gen=++TGEN;const box=$("#mtransform");box.r
  if(!tr.has_m){const d=dateOrderControl(tr,dfid,ent);const m=h("span",{class:"mute"});
   d.sel.onchange=async()=>{try{await api("/api/transform/save",{dataflow_id:dfid,entity:ent,use_m:false,accept_partial:false,override_sql:"",extra_inputs:[],date_order:d.sel.value});m.textContent=" saved";m.className="ok";loadMap()}catch(e){m.textContent=" "+e.message;m.className="bad"}};
   box.append(h("div",{class:"card"},h("div",{class:"mute"},"No Power Query code stored for this entity, so columns are mapped straight to attributes."),d.box,m));return}
- const tables=(await api("/api/schema")).filter(x=>x.kind==="table").map(x=>x.name);if(gen!==TGEN)return;
+ const schema=await api("/api/schema");window.ALLTABLES=schema.map(x=>x.name);const tables=schema.filter(x=>x.kind==="table").map(x=>x.name);if(gen!==TGEN)return;
  const flash=FLASH;FLASH="";
  const useBox=h("input",{type:"checkbox"}),partBox=h("input",{type:"checkbox"});useBox.checked=tr.use_m;partBox.checked=tr.accept_partial;
  const ov=h("textarea",{rows:8,class:"mono",placeholder:"Optional: your own SELECT reading staged table _stg (columns = the input columns below, plus __row). Overrides the generated SQL."});ov.value=tr.override_sql;
@@ -188,7 +191,7 @@ async function loadTransform(){const gen=++TGEN;const box=$("#mtransform");box.r
   const specific=Object.entries(tr.coverholder_bindings||{}).filter(([c,b])=>b[n]).map(([c,b])=>`${c} → ${b[n]}`).join("; ");
   chSel.onchange=()=>{sel.value=chSel.value?((tr.coverholder_bindings[chSel.value]||{})[n]||""):(tr.bindings[n]||"")};
   const bm=h("span",{class:"mute"});
-  return h("div",{style:"margin:.3rem 0"},h("b",{},n)," ",h("span",{class:"pill"},r.kind)," ",r.reason?h("span",{class:"bad"},r.reason+" "):"","bind to table: ",sel," for ",chSel," ",
+  return h("div",{style:"margin:.3rem 0"},h("b",{},n)," ",h("span",{class:"pill"},r.auto?"matched by file name":r.kind)," ",r.auto?h("span",{class:"mute"},"("+r.file+" → "+r.table+") "):"",r.reason?h("span",{class:"bad"},r.reason+" "):"","bind to table: ",sel," for ",chSel," ",
    h("button",{class:"b",on:{click:async()=>{try{await api("/api/bindings/save",{dataflow_id:dfid,query_name:n,table_name:sel.value,coverholder:chSel.value});bm.textContent="Bound";loadMap()}catch(e){bm.textContent=e.message;bm.className="bad"}}}},"Bind")," ",bm,specific?h("div",{class:"mute"},"per coverholder: "+specific):"")});
  const refPath=h("input",{type:"text",placeholder:"full path of a lookup .xlsx/.csv on this computer"}),refMsg=h("span",{class:"mute"});
  const stored=await api("/api/files/stored");if(gen!==TGEN)return;const stSel=h("select",{},...stored.map(f=>h("option",{value:f.sha256},(f.coverholder?f.coverholder+" / ":"")+f.rel_path))),stSheet=h("input",{type:"text",placeholder:"sheet (first if blank)",style:"width:10rem"});
@@ -201,6 +204,15 @@ async function loadTransform(){const gen=++TGEN;const box=$("#mtransform");box.r
   Object.keys(tr.references).length?h("div",{style:"margin-top:.6rem"},h("b",{},"Lookups / referenced queries"),...refs):"",
   h("div",{style:"margin:.5rem 0"},"Import a lookup workbook you already profiled: ",stSel," sheet ",stSheet," ",h("button",{class:"b",on:{click:async()=>{try{const r=await api("/api/reference/import-stored",{sha256:stSel.value,sheet:stSheet.value});FLASH=`Created table ${r.table} (${r.rows} rows). Bind a lookup to it below; it refreshes automatically when that file changes.`;loadMap()}catch(e){refMsg.textContent=e.message;refMsg.className="bad"}}}},"Import")),
   h("div",{style:"margin:.5rem 0"},"…or a file path on this computer: ",refPath," ",h("button",{class:"b",on:{click:async()=>{try{const r=await api("/api/reference/import",{path:refPath.value});FLASH=`Created table ${r.table} (${r.rows} rows). Bind a lookup to it below.`;loadMap()}catch(e){refMsg.textContent=e.message;refMsg.className="bad"}}}},"Import")," ",refMsg),
+  tr.sources&&tr.sources.length?h("div",{style:"margin-top:.6rem"},h("b",{},"Sources this dataflow reads"),...tr.sources.map(s=>{
+    const hint=[...(s.hints.entity||[]).map(x=>"entity "+x),...(s.hints.files||[])].join(" · ");
+    const allT=(window.ALLTABLES||[]);const sel=h("select",{},h("option",{value:""},"— choose table or view —"),...allT.map(x=>h("option",{value:x},x)));sel.value=s.table||"";
+    const msg=h("span",{class:"mute"});
+    const chipCls2=s.mode==="missing"?"bad":s.mode==="stage_input"?"mute":"ok";
+    const label={stage_input:"previous stage's output",bound:"bound",auto:"matched automatically",missing:"needs a table"}[s.mode]||s.mode;
+    return h("div",{style:"margin:.3rem 0"},h("span",{class:"mono"},(s.step||s.query)+" "),hint?h("span",{class:"mute"},"("+hint+") "):"",h("span",{class:"pill "+chipCls2},label),s.table?h("span",{class:"mono"}," → "+s.table):"",
+      s.candidates&&s.candidates.length?h("span",{class:"warn"}," could be: "+s.candidates.join(", ")):"",
+      s.mode!=="stage_input"||tr.sources.length>1?h("span",{},"  use ",sel," ",h("button",{class:"b",on:{click:async()=>{try{await api("/api/bindings/save",{dataflow_id:dfid,query_name:`${s.query}::${s.step}`,table_name:sel.value});msg.textContent="Bound";loadMap()}catch(e){msg.textContent=e.message;msg.className="bad"}}}},"Bind")," ",msg):"")})):"",
   h("details",{},h("summary",{},"Generated SQL"),h("pre",{class:"mono mute scroll",style:"white-space:pre-wrap"},tr.generated_sql||"(none)")),
   h("div",{style:"margin-top:.5rem"},h("b",{},"SQL override"),ov,h("div",{style:"margin-top:.3rem"},extra)),
   tr.inputs.length?h("div",{class:"mute",style:"margin-top:.4rem"},"Input columns the steps read (map your sheet columns to these below): ",tr.inputs.join(", ")):"",
@@ -215,7 +227,14 @@ async function loadMap(){loadTransform();const mgen=++MGEN;const box=$("#mlayout
    h("div",{class:"mute",style:"margin-top:.4rem"},"Configure the Power Query steps, lookups and date order in the panel above.")));return}
  $("#mtable").textContent="→ table "+m.table+(m.mode==="m"?" · mapping sheet columns to Power Query input columns":" · mapping sheet columns to attributes");
  if(!m.layouts.length)box.append(h("div",{class:"card mute"},"Profile some files first (step 1)."));
- for(const lay of m.layouts){const sels=[];
+ const allCh=[...new Set(m.layouts.flatMap(l=>l.coverholders||[]))].sort();
+ const hasAssigned=m.assigned_coverholders&&m.assigned_coverholders.length;
+ if(allCh.length){const want=window.MFILTER!==undefined?window.MFILTER:(hasAssigned?"__assigned":"");
+  const fs=h("select",{},h("option",{value:""},"all coverholders"),hasAssigned?h("option",{value:"__assigned"},"coverholders using this dataflow: "+m.assigned_coverholders.join(", ")):"",...allCh.map(c=>h("option",{value:c},c)));
+  fs.value=want;fs.onchange=()=>{window.MFILTER=fs.value;loadMap()};$("#mfilter").replaceChildren("Show layouts of: ",fs)}else $("#mfilter").replaceChildren();
+ const flt=window.MFILTER!==undefined?window.MFILTER:(hasAssigned?"__assigned":"");
+ const visible=l=>!flt||!(l.coverholders&&l.coverholders.length)||(flt==="__assigned"?l.coverholders.some(c=>m.assigned_coverholders.includes(c)):l.coverholders.includes(flt));
+ for(const lay of m.layouts.filter(visible)){const sels=[];
   const rows=lay.norm_headers.map((nh,i)=>{const sel=h("select",{"data-h":nh},h("option",{value:""},"— skip —"),...m.attributes.map(a=>h("option",{value:a.name},`${a.name} (${a.type})`)));
    const sv=lay.saved[nh],sg=lay.suggested[nh];sel.value=sv||(sg?sg.attribute:"");sels.push(sel);
    return[i+1,lay.headers[i],sv?h("span",{class:"ok"},"saved"):sg?h("span",{class:"warn"},"suggested "+Math.round(sg.score*100)+"%"):"",sel]});
@@ -260,7 +279,7 @@ async function initPipeline(){[DFS,CHS,PL]=await Promise.all([api("/api/dataflow
  if(!PCUR||!PL.find(p=>p.pipeline_id===PCUR.pipeline_id))PCUR=PL[0]?JSON.parse(JSON.stringify(PL[0])):blankPipe();s.value=PCUR.pipeline_id||"";renderPipe();refreshStatus()}
 $("#pselect").onchange=()=>{const p=PL.find(x=>x.pipeline_id===$("#pselect").value);PCUR=p?JSON.parse(JSON.stringify(p)):blankPipe();renderPipe();refreshStatus()};
 $("#pnew").onclick=()=>{PCUR=blankPipe();$("#pselect").value="";renderPipe();$("#pstatus").replaceChildren();$("#pdetail").replaceChildren()};
-const dfSel=(val,on)=>{const s=h("select",{},h("option",{value:""},"— dataflow —"),...DFS.map(d=>h("option",{value:d.dataflow_id},`${d.name||"(unnamed)"} · ${d.dataflow_id}`)));s.value=val||"";s.onchange=()=>on(s.value);return s};
+const dfSel=(val,on)=>{const s=h("select",{},h("option",{value:""},"— default: none (per coverholder) —"),...DFS.map(d=>h("option",{value:d.dataflow_id},`${d.name||"(unnamed)"} · ${d.dataflow_id}`)));s.value=val||"";s.onchange=()=>on(s.value);return s};
 const entSel=(dfid,val,on)=>{const d=DFS.find(x=>x.dataflow_id===dfid);const s=h("select",{},h("option",{value:""},"— entity —"),...(d?d.entities:[]).map(e=>h("option",{value:e.name},e.name)));s.value=val||"";s.onchange=()=>on(s.value);return s};
 function renderPipe(){$("#pname").value=PCUR.name;const box=$("#pstages");box.replaceChildren();
  if(!PCUR.stages.length)PCUR.stages.push({name:"Normalise",kind:"files",dataflow_id:"",entity:"",output_table:""});
@@ -270,13 +289,30 @@ function renderPipe(){$("#pname").value=PCUR.name;const box=$("#pstages");box.re
   const name=h("input",{type:"text",value:st.name,style:"width:9rem"});name.oninput=()=>st.name=name.value;
   const out=h("input",{type:"text",value:st.output_table||"",placeholder:"output table (auto)",style:"width:11rem"});out.oninput=()=>st.output_table=out.value;
   const inp=i===0?"":h("select",{},...PCUR.stages.slice(0,i).map((x,j)=>h("option",{value:j},"reads: "+(x.name||"stage "+(j+1)))));if(inp){inp.value=st.input_stage??(i-1);inp.onchange=()=>st.input_stage=parseInt(inp.value);st.input_stage=parseInt(inp.value)}
-  row.append(h("span",{class:"pill"},kindTxt),name,dfSel(st.dataflow_id,v=>{st.dataflow_id=v;st.entity="";renderPipe()}),ent,inp,out,i?h("button",{class:"b",on:{click:()=>{PCUR.stages.splice(i,1);PCUR.overrides=PCUR.overrides.filter(o=>o.position!==i).map(o=>({...o,position:o.position>i?o.position-1:o.position}));renderPipe()}}},"Remove"):"");
+  row.append(h("span",{class:"pill"},kindTxt),name,dfSel(st.dataflow_id,v=>{st.dataflow_id=v;st.entity="";if(v){const d=DFS.find(x=>x.dataflow_id===v);if(d&&d.entities.length===1)st.entity=d.entities[0].name}renderPipe()}),ent,inp,out,i?h("button",{class:"b",on:{click:()=>{PCUR.stages.splice(i,1);PCUR.overrides=PCUR.overrides.filter(o=>o.position!==i).map(o=>({...o,position:o.position>i?o.position-1:o.position}));renderPipe()}}},"Remove"):"");
   box.append(row)});
- const ob=$("#povr");ob.replaceChildren(...PCUR.overrides.map((o,k)=>{const stSel=h("select",{},...PCUR.stages.map((x,j)=>h("option",{value:j},x.name||"stage "+(j+1))));stSel.value=o.position;stSel.onchange=()=>o.position=parseInt(stSel.value);
-  const chSel=h("select",{},h("option",{value:""},"— coverholder —"),...CHS.filter(c=>c.name).map(c=>h("option",{value:c.name},c.name)));chSel.value=o.coverholder||"";chSel.onchange=()=>o.coverholder=chSel.value;
-  return h("div",{style:"display:flex;gap:.4rem;flex-wrap:wrap;margin:.3rem 0"},"For stage",stSel,"and",chSel,"use",dfSel(o.dataflow_id,v=>{o.dataflow_id=v;o.entity="";renderPipe()}),entSel(o.dataflow_id,o.entity,v=>o.entity=v),h("button",{class:"b",on:{click:()=>{PCUR.overrides.splice(k,1);renderPipe()}}},"Remove"))}))}
+renderMatrix()}
+function ovrOf(pos,ch){return PCUR.overrides.find(o=>o.position===pos&&o.coverholder===ch)}
+function setOvr(pos,ch,df,ent){PCUR.overrides=PCUR.overrides.filter(o=>!(o.position===pos&&o.coverholder===ch));if(df)PCUR.overrides.push({position:pos,coverholder:ch,dataflow_id:df,entity:ent||""})}
+function renderMatrix(){const box=$("#povr");const per=PCUR.stages.map((s,i)=>({s,i})).filter(x=>x.s.kind!=="merge");
+ const names=[...new Set([...CHS.map(c=>c.name).filter(Boolean),...PCUR.overrides.map(o=>o.coverholder)])].sort();
+ if(!names.length){box.replaceChildren(h("div",{class:"mute",style:"padding:.5rem"},"Profile some coverholder folders first."));return}
+ const rows=names.map(ch=>[ch,...per.map(({s,i})=>{const o=ovrOf(i,ch)||{};const d=DFS.find(x=>x.dataflow_id===o.dataflow_id);
+   const dsel=h("select",{},h("option",{value:""},s.dataflow_id?"(stage default)":"— choose —"),...DFS.map(x=>h("option",{value:x.dataflow_id},x.name||x.dataflow_id)));dsel.value=o.dataflow_id||"";
+   const esel=h("select",{},h("option",{value:""},"— entity —"),...(d?d.entities:[]).map(e=>h("option",{value:e.name},e.name)));esel.value=o.entity||"";
+   dsel.onchange=()=>{const nd=DFS.find(x=>x.dataflow_id===dsel.value);setOvr(i,ch,dsel.value,nd&&nd.entities.length===1?nd.entities[0].name:"");renderMatrix()};
+   esel.onchange=()=>setOvr(i,ch,dsel.value,esel.value);
+   const bad=!o.dataflow_id&&!s.dataflow_id;
+   return h("div",{style:"display:flex;gap:.3rem;flex-wrap:wrap"+(bad?";outline:1px solid var(--warn);border-radius:4px;padding:2px":"")},dsel,o.dataflow_id?esel:"")})]);
+ box.replaceChildren(table(["Coverholder",...per.map(({s})=>s.name)],rows))}
+$("#pmatch").onclick=()=>{const per=PCUR.stages.map((s,i)=>({s,i})).filter(x=>x.s.kind!=="merge");const low=x=>(x||"").toLowerCase();let set=0,miss=[];
+ const names=CHS.map(c=>c.name).filter(Boolean);
+ for(const ch of names)for(const {s,i} of per){if(ovrOf(i,ch)){continue}
+  const withCh=DFS.filter(d=>low(d.name).includes(low(ch)));const withBoth=withCh.filter(d=>low(d.name).includes(low(s.name)));
+  const pick=withBoth.length===1?withBoth[0]:null;
+  if(pick){setOvr(i,ch,pick.dataflow_id,pick.entities.length===1?pick.entities[0].name:"");set++}else miss.push(`${ch}/${s.name}`)}
+ renderMatrix();$("#pmatchmsg").textContent=`Matched ${set}.`+(miss.length?` No unique match for: ${miss.slice(0,6).join(", ")}${miss.length>6?"…":""} (name the stage like the dataflows, e.g. "Normalise" for "ACME Normalise")`:"");$("#pmatchmsg").className=miss.length?"warn":"ok"};
 $("#padd").onclick=()=>{const kind=$("#paddkind").value;PCUR.stages.push({name:kind==="merge"?"Merge":"Stage "+(PCUR.stages.length+1),kind,dataflow_id:"",entity:"",output_table:"",input_stage:PCUR.stages.length-1});renderPipe()};
-$("#povradd").onclick=()=>{PCUR.overrides.push({position:0,coverholder:"",dataflow_id:"",entity:""});renderPipe()};
 $("#pname").oninput=()=>PCUR.name=$("#pname").value;
 $("#psave").onclick=async()=>{const m=$("#pmsg2");try{const saved=await api("/api/pipelines/save",{...PCUR,name:$("#pname").value});PCUR=saved;m.textContent="Saved";m.className="ok";PL=await api("/api/pipelines");const s=$("#pselect");s.replaceChildren(h("option",{value:""},"— new pipeline —"),...PL.map(p=>h("option",{value:p.pipeline_id},p.name)));s.value=saved.pipeline_id;renderPipe()}catch(e){m.textContent=e.message;m.className="bad"}};
 $("#pdel").onclick=async()=>{if(!PCUR.pipeline_id||!confirm("Delete this pipeline definition? (Output tables are kept.)"))return;await api("/api/pipelines/delete",{pipeline_id:PCUR.pipeline_id});PCUR=null;initPipeline()};

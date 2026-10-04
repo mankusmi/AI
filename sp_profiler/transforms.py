@@ -67,14 +67,38 @@ def date_order(con, dataflow_id: str, entity: str) -> tuple[str, str, str]:
     return date_order_for_culture(culture), culture, "culture"
 
 
-def translate(con, dataflow_id: str, entity: str, coverholder: str = "") -> Pipeline:
+def reference_index(con) -> dict[str, list[tuple]]:
+    """Imported lookup tables by the name of the file they came from: {file name (lower): [(table, sheet)]}.
+
+    A lookup query whose M names that file (File.Contents / SharePoint path / Name = "x.xlsx") is matched to its table
+    automatically, so one shared mapping workbook serves every coverholder's dataflow without binding each by hand.
+    """
+    import os
+    out: dict[str, list[tuple]] = {}
+    for table, source_id, path, sheet in con.execute("SELECT table_name, source_id, source_path, sheet FROM reference_tables").fetchall():
+        name = None
+        if source_id:
+            r = con.execute("SELECT name FROM v_files WHERE COALESCE(NULLIF(item_id, ''), location, rel_path) = ? LIMIT 1",
+                            [source_id]).fetchone()
+            name = r[0] if r else os.path.basename(str(source_id).split("?")[0])
+        elif path:
+            name = os.path.basename(path)
+        if name:
+            out.setdefault(name.lower(), []).append((table, sheet or ""))
+    return out
+
+
+def translate(con, dataflow_id: str, entity: str, coverholder: str = "", source_resolver=None) -> Pipeline:
     return Translator(dataflow_queries(con, dataflow_id), bindings(con, dataflow_id, coverholder),
-                      entity_tables(con, dataflow_id), date_order(con, dataflow_id, entity)[0]).translate(entity)
+                      entity_tables(con, dataflow_id), date_order(con, dataflow_id, entity)[0],
+                      reference_index(con), source_resolver).translate(
+        entity, [r[0] for r in con.execute("SELECT name FROM dataflow_attributes WHERE dataflow_id = ? AND entity = ? ORDER BY position",
+                                           [dataflow_id, entity]).fetchall()])
 
 
-def resolve(con, dataflow_id: str, entity: str, coverholder: str = "") -> dict:
+def resolve(con, dataflow_id: str, entity: str, coverholder: str = "", source_resolver=None) -> dict:
     """Decide what a load will run: {mode: 'm'|'attribute', sql, inputs, status, pipeline, ...}."""
-    p = translate(con, dataflow_id, entity, coverholder)
+    p = translate(con, dataflow_id, entity, coverholder, source_resolver)
     st = settings(con, dataflow_id, entity)
     use = (st["use_m"] if st else p.complete)            # no explicit choice: auto-on only if fully translated
     extra = (st or {}).get("extra_inputs", [])
@@ -82,7 +106,7 @@ def resolve(con, dataflow_id: str, entity: str, coverholder: str = "") -> dict:
     out = {"pipeline": p, "settings": st, "translated": p.complete, "use_m": bool(use), "mode": "attribute",
            "date_order": order, "culture": culture, "date_order_source": order_src,
            "sql": None, "inputs": [], "status": "disabled", "generated_sql": p.sql() if len(p.ctes) > 1 else "",
-           "dynamic_columns": p.dynamic_columns}
+           "dynamic_columns": p.dynamic_columns, "sources": p.sources}
     if not use:
         return out
     inputs = list(dict.fromkeys(p.inputs + extra))
