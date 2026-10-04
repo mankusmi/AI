@@ -1,0 +1,23 @@
+name: tests
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - name: Lint (sp_profiler and its tests)
+        run: ruff check sp_profiler tests/test_sp_*.py tests/test_m_transform.py tests/test_fixes.py tests/test_export.py tests/test_graph_source.py tests/test_medium_fixes.py tests/test_server_hardening.py tests/test_ui_smoke.py tests/test_pipeline.py tests/test_ui_pipeline.py tests/test_pipeline_per_coverholder.py tests/test_ui_pipeline_per_coverholder.py
+      - name: Install browser for the UI smoke test
+        if: matrix.os == 'ubuntu-latest'
+        run: playwright install --with-deps chromium
+      - run: pytest -q

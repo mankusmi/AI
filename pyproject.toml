@@ -12,14 +12,32 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
-live = ["requests>=2.28", "msal>=1.24"]
-dev = ["pytest>=7.0", "requests>=2.28", "msal>=1.24"]
+live = ["requests>=2.28,<3", "msal>=1.24,<2"]
+# sp-profile: Excel files from SharePoint -> DuckDB. msal-extensions gives OS-encrypted token storage (optional at runtime).
+sharepoint = ["openpyxl>=3.1,<4", "duckdb>=1.0,<2", "pytz", "requests>=2.28,<3", "msal>=1.24,<2", "msal-extensions>=1.0,<2"]
+dev = ["pytest>=7.0", "ruff>=0.5", "pyarrow>=14", "playwright>=1.40",
+       "openpyxl>=3.1,<4", "duckdb>=1.0,<2", "pytz", "requests>=2.28,<3", "msal>=1.24,<2", "msal-extensions>=1.0,<2"]
 
 [project.scripts]
 pbi-profile = "pbi_profiler.cli:main"
+sp-profile = "sp_profiler.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["pbi_profiler*"]
+include = ["pbi_profiler*", "sp_profiler*"]
+
+[tool.setuptools.package-data]
+sp_profiler = ["web/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["browser: drives a real browser (skipped when Playwright/Chromium is not available)"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py310"
+extend-exclude = ["venv", "pbi_profiler", "wireframer"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+# E70x: the translator's function table is deliberately written as compact one-liners
+ignore = ["E501", "E701", "E702", "E731"]

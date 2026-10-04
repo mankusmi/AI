@@ -1,0 +1,307 @@
+"""File sources: a local / OneDrive-synced folder, or a SharePoint folder via Microsoft Graph.
+
+Both yield ``FileEntry`` objects and know how to hand out a local copy of the
+file (``materialize``) so the inspector never cares where the bytes came from.
+"""
+from __future__ import annotations
+
+import contextlib
+import os
+import logging
+import shutil
+import tempfile
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
+from typing import Callable, Iterator, Optional
+from urllib.parse import quote, urlparse
+
+
+@dataclass
+class FileEntry:
+    rel_path: str                     # path relative to the profiled root, '/' separated
+    name: str
+    size_bytes: int
+    modified: Optional[str] = None    # ISO 8601 UTC
+    created: Optional[str] = None
+    modified_by: Optional[str] = None
+    location: str = ""                # absolute path or SharePoint web URL
+    meta: dict = field(default_factory=dict)   # source-specific SharePoint metadata
+    _materialize: Callable[[], contextlib.AbstractContextManager] = field(default=None, repr=False)
+
+    @property
+    def extension(self) -> str:
+        return PurePosixPath(self.name).suffix.lower()
+
+    @property
+    def folder(self) -> str:
+        parent = str(PurePosixPath(self.rel_path).parent)
+        return "" if parent == "." else parent
+
+    @property
+    def depth(self) -> int:
+        return len(PurePosixPath(self.rel_path).parts) - 1
+
+    @contextlib.contextmanager
+    def materialize(self) -> Iterator[Path]:
+        with self._materialize() as p:
+            yield p
+
+
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
+
+
+# --------------------------------------------------------------------------- local
+class LocalSource:
+    """Walk a local folder (e.g. a synced SharePoint library or a downloaded copy)."""
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root).expanduser().resolve()
+        if not self.root.is_dir():
+            raise FileNotFoundError(f"Not a directory: {self.root}")
+
+    def iter_files(self) -> Iterator[FileEntry]:
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            dirnames.sort()
+            for fn in sorted(filenames):
+                full = Path(dirpath) / fn
+                try:
+                    st = full.stat()
+                except OSError:
+                    continue
+                yield FileEntry(
+                    rel_path=full.relative_to(self.root).as_posix(),
+                    name=fn,
+                    size_bytes=st.st_size,
+                    modified=_iso(st.st_mtime),
+                    created=_iso(st.st_ctime),
+                    location=str(full),
+                    _materialize=lambda p=full: contextlib.nullcontext(p),
+                )
+
+
+class FileListSource:
+    """Explicit list of local files (e.g. ticked in the browser UI)."""
+
+    def __init__(self, paths: list[str | Path]):
+        self.paths = [Path(p).expanduser().resolve() for p in paths]
+        if not self.paths:
+            raise ValueError("No files given")
+        parents = {str(p.parent) for p in self.paths}
+        try:
+            self.root = Path(os.path.commonpath(parents))
+        except ValueError:            # Windows: files on different drives have no common folder
+            self.root = None
+
+    def _rel(self, full: Path) -> str:
+        if self.root is not None:
+            return full.relative_to(self.root).as_posix()
+        return full.as_posix().replace(":", "")        # "D:/x/y.xlsx" -> "D/x/y.xlsx"
+
+    def iter_files(self) -> Iterator[FileEntry]:
+        for full in sorted(self.paths):
+            st = full.stat()
+            yield FileEntry(
+                rel_path=self._rel(full), name=full.name, size_bytes=st.st_size,
+                modified=_iso(st.st_mtime), created=_iso(st.st_ctime), location=str(full),
+                _materialize=lambda p=full: contextlib.nullcontext(p))
+
+
+# --------------------------------------------------------------------------- graph
+log = logging.getLogger("sp_profiler")
+GRAPH = "https://graph.microsoft.com/v1.0"
+SCOPES = ["Files.Read.All", "Sites.Read.All"]
+# Microsoft's own public client ("Microsoft Graph Command Line Tools"): lets you sign in through the
+# browser without registering an app. Your tenant may require admin consent or block it; pass
+# --client-id for your own public-client app registration (redirect URI http://localhost) if so.
+DEFAULT_CLIENT_ID = "14d82eec-204b-4c2c-b7e8-06de6ef8d2e6"
+CACHE_PATH = Path.home() / ".sp_profiler" / "token_cache.json"
+
+
+class BrowserAuth:
+    """Delegated sign-in through the system browser, with a persistent token cache (silent refresh).
+
+    The cache is stored encrypted by the operating system when ``msal-extensions`` can do so (Windows DPAPI, macOS
+    Keychain, Linux libsecret). Otherwise it falls back to a plain JSON file restricted to the current user, and says so.
+    ``token()`` is safe to call from several threads.
+    """
+
+    def __init__(self, tenant_id: str = "organizations", client_id: str = DEFAULT_CLIENT_ID,
+                 cache_path: Path = CACHE_PATH, secure: bool = True):
+        import msal
+        self.cache_path = Path(cache_path)
+        self._lock = threading.Lock()
+        self.cache, self.storage = self._build_cache(msal, secure)
+        self.app = msal.PublicClientApplication(
+            client_id, authority=f"https://login.microsoftonline.com/{tenant_id or 'organizations'}",
+            token_cache=self.cache)
+
+    def _build_cache(self, msal, secure: bool):
+        if secure:
+            try:
+                from msal_extensions import PersistedTokenCache, build_encrypted_persistence
+                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+                return PersistedTokenCache(build_encrypted_persistence(str(self.cache_path.with_suffix(".enc")))), "encrypted"
+            except Exception as e:      # package missing, or no keyring/libsecret on this machine
+                log.warning("Encrypted token storage is unavailable (%s: %s); the sign-in will be cached in a plain file "
+                            "readable only by you: %s", type(e).__name__, e, self.cache_path)
+        cache = msal.SerializableTokenCache()
+        if self.cache_path.exists():
+            cache.deserialize(self.cache_path.read_text())
+        return cache, "file"
+
+    @staticmethod
+    def forget(cache_path: Path = CACHE_PATH) -> None:
+        """Delete every cached sign-in (encrypted store and plain file)."""
+        cache_path = Path(cache_path)
+        try:
+            from msal_extensions import build_encrypted_persistence
+            build_encrypted_persistence(str(cache_path.with_suffix(".enc"))).delete()
+        except Exception:
+            pass
+        for p in (cache_path, cache_path.with_suffix(".enc")):
+            p.unlink(missing_ok=True)
+
+    def token(self) -> str:
+        with self._lock:
+            res = None
+            accounts = self.app.get_accounts()
+            if accounts:
+                res = self.app.acquire_token_silent(SCOPES, account=accounts[0])
+            if not res:
+                res = self.app.acquire_token_interactive(SCOPES)   # opens the browser
+            if "access_token" not in res:
+                raise RuntimeError(f"Sign-in failed: {res.get('error_description', res)}")
+            if self.storage == "file" and self.cache.has_state_changed:
+                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+                self.cache_path.write_text(self.cache.serialize())
+                try:
+                    self.cache_path.chmod(0o600)
+                except OSError:
+                    pass
+            return res["access_token"]
+
+
+class GraphSource:
+    """List and download files from a SharePoint document library via Microsoft Graph."""
+
+    def __init__(self, site_url: str, folder: str = "", library: str = "Documents",
+                 auth=None, session=None):
+        import requests  # local import: core package stays dependency-free
+        self.site_url, self.folder, self.library = site_url, folder.strip("/"), library
+        self.auth = auth or BrowserAuth()
+        self.session = session or requests.Session()
+        self._sleep = time.sleep                      # replaceable in tests
+        self.drive_id = self._resolve_drive()
+
+    # graph helpers ---------------------------------------------------------
+    RETRY_STATUS = (429, 500, 502, 503, 504)
+
+    def _request(self, url: str, stream: bool = False, authorize: bool = True, attempts: int = 5):
+        """GET with retries: throttling (429/5xx, honouring Retry-After) and transient network errors."""
+        import requests
+        last: Exception | None = None
+        for attempt in range(attempts):
+            headers = {"Authorization": f"Bearer {self.auth.token()}"} if authorize else {}
+            try:
+                r = self.session.get(url, headers=headers, stream=stream, timeout=(15, 300))
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last = e
+                self._sleep(min(2 ** attempt, 30))
+                continue
+            if r.status_code in self.RETRY_STATUS:
+                ra = r.headers.get("Retry-After", "")
+                wait = int(ra) if ra.isdigit() else min(2 ** attempt, 30)
+                r.close()
+                last = RuntimeError(f"HTTP {r.status_code} from {url.split('?')[0]}")
+                self._sleep(min(wait, 120))
+                continue
+            return r
+        raise RuntimeError(f"Giving up after {attempts} attempts: {last}")
+
+    def _get(self, url: str) -> dict:
+        r = self._request(url)
+        try:
+            r.raise_for_status()
+            return r.json()
+        finally:
+            r.close()
+
+    def _resolve_drive(self) -> str:
+        u = urlparse(self.site_url)
+        site = self._get(f"{GRAPH}/sites/{u.netloc}:{u.path.rstrip('/')}")
+        self.site_id = site["id"]
+        drives = self._get(f"{GRAPH}/sites/{site['id']}/drives")["value"]
+        for d in drives:
+            if d["name"].lower() == self.library.lower():
+                return d["id"]
+        raise LookupError(f"Library {self.library!r} not found; available: {[d['name'] for d in drives]}")
+
+    def _children_url(self, folder: str) -> str:
+        if not folder:
+            return f"{GRAPH}/drives/{self.drive_id}/root/children?$top=200"
+        return f"{GRAPH}/drives/{self.drive_id}/root:/{quote(folder)}:/children?$top=200"
+
+    def _walk(self, folder: str) -> Iterator[tuple[str, dict]]:
+        url = self._children_url(folder)
+        while url:
+            page = self._get(url)
+            for item in page.get("value", []):
+                if "folder" in item:
+                    yield from self._walk(f"{folder}/{item['name']}".strip("/"))
+                elif "file" in item:
+                    yield folder, item
+            url = page.get("@odata.nextLink")
+
+    def _download(self, item: dict):
+        @contextlib.contextmanager
+        def cm() -> Iterator[Path]:
+            tmpdir = tempfile.mkdtemp(prefix="sp_profiler_")
+            path = Path(tmpdir) / item["name"]
+            try:
+                url = item.get("@microsoft.graph.downloadUrl")
+                content_url = f"{GRAPH}/drives/{self.drive_id}/items/{item['id']}/content"
+                r = self._request(url or content_url, stream=True, authorize=not url)   # pre-signed URLs must not get a bearer
+                if url and r.status_code in (401, 403):          # signed link expired: ask Graph for a fresh one
+                    r.close()
+                    fresh = self._get(f"{GRAPH}/drives/{self.drive_id}/items/{item['id']}")
+                    r = self._request(fresh.get("@microsoft.graph.downloadUrl") or content_url, stream=True,
+                                      authorize=not fresh.get("@microsoft.graph.downloadUrl"))
+                try:
+                    r.raise_for_status()
+                    r.raw.decode_content = True
+                    with open(path, "wb") as fh:
+                        shutil.copyfileobj(r.raw, fh)
+                finally:
+                    r.close()
+                yield path
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+        return cm
+
+    def iter_files(self) -> Iterator[FileEntry]:
+        for folder, item in self._walk(self.folder):
+            rel_folder = folder[len(self.folder):].strip("/") if self.folder else folder
+            by = lambda k: (item.get(k, {}).get("user", {}) or {})
+            hashes = item.get("file", {}).get("hashes", {}) or {}
+            yield FileEntry(
+                rel_path=f"{rel_folder}/{item['name']}".strip("/"),
+                name=item["name"],
+                size_bytes=int(item.get("size", 0)),
+                modified=item.get("lastModifiedDateTime"),
+                created=item.get("createdDateTime"),
+                modified_by=by("lastModifiedBy").get("displayName"),
+                location=item.get("webUrl", ""),
+                meta={
+                    "site_url": self.site_url, "library": self.library, "drive_id": self.drive_id,
+                    "item_id": item.get("id"), "sp_path": folder, "mime_type": item.get("file", {}).get("mimeType"),
+                    "created_by": by("createdBy").get("displayName"),
+                    "modified_by_email": by("lastModifiedBy").get("email"),
+                    "etag": item.get("eTag"), "ctag": item.get("cTag"),
+                    "quickxor_hash": hashes.get("quickXorHash"), "sha1_hash": hashes.get("sha1Hash"),
+                },
+                _materialize=self._download(item),
+            )
