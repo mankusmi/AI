@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 from . import dataflow as df
 from . import mapping_load as ml
 from . import pipeline as pl
+from . import profiling as pf
 from . import query as q
 from . import transforms as tf
 from .runner import coverholder_resolver, run_profile
@@ -510,6 +511,15 @@ def make_handler(app: App, port: int):
             if path == "/api/profile-data":
                 sql = b.get("sql") or f'SELECT * FROM "{b["table"].replace(chr(34), chr(34) * 2)}"'
                 return q.profile_query(cur, sql)
+            if path == "/api/profile/summary":
+                return pf.table_summary(cur, pf.source_sql(b.get("table", ""), b.get("sql", ""), b.get("coverholder", "")))
+            if path == "/api/profile/column":
+                return pf.column_profile(cur, pf.source_sql(b.get("table", ""), b.get("sql", ""), b.get("coverholder", "")), b["column"],
+                                         int(b.get("top_n", 20)), int(b.get("bins", 20)))
+            if path == "/api/profile/pipeline":
+                return pf.profile_pipeline(cur, b["pipeline_id"], b.get("coverholder", ""))
+            if path == "/api/profile/history":
+                return pf.snapshot_history(cur, b["pipeline_id"])
             raise LookupError(path)
 
     return H

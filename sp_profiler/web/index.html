@@ -94,6 +94,10 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
    <label class="mute"><input type="checkbox" id="pforce"> redo everything (ignore "unchanged")</label>
    <label class="mute"><input type="checkbox" id="ppartial"> merge even if some coverholders are not ready</label></div>
   <div class="prog" style="margin:.6rem 0"><i id="prbar" style="width:0"></i></div><div id="prmsg" class="mono mute"></div></div>
+ <div class="card"><h2>Profile every stage</h2>
+  <div class="mute" style="margin-bottom:.4rem">Summary of each stage's output table (rows, duplicates, empty/constant columns, columns added or dropped). Click a column for an in-depth profile. Each run of this is saved so stages and runs can be compared.</div>
+  <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center"><select id="pfch"></select><button class="b p" id="pfgo">Profile stages</button><span id="pfmsg" class="mute"></span></div>
+  <div id="pfout" style="margin-top:.6rem"></div></div>
  <div class="card"><h2>Status <span class="mute" style="font-weight:400" id="pstime"></span></h2><div id="pstatus"></div><div id="pdetail" style="margin-top:.5rem"></div></div>
 </section>
 <section id="sql">
@@ -108,7 +112,7 @@ th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflo
   <input type="text" id="xcat" value="main" style="flex:0 1 90px"><input type="text" id="xsch" value="bordereaux" style="flex:0 1 120px"></div>
   <div style="margin-top:.5rem;display:flex;gap:.8rem;flex-wrap:wrap;align-items:center"><label class="mute"><input type="checkbox" id="xinc"> incremental (only sheets loaded since last export)</label>
   <label class="mute"><input type="checkbox" id="xblob"> include original Excel files</label><button class="b p" id="xgo">Export</button><span id="xmsg" class="mute"></span></div></details></div>
- <div class="card" id="profcard" style="display:none"><h2 id="proftitle">Profile</h2><div id="profile" class="scroll"></div></div></div></div>
+ <div class="card" id="profcard" style="display:none"><h2 id="proftitle">Profile</h2><div id="profile" class="scroll"></div></div><div class="card" id="deepcard" style="display:none"><div id="deep"></div></div></div></div>
 </section>
 </main>
 <script>
@@ -260,12 +264,52 @@ async function runSql(){$("#sqlmsg").textContent="running…";const sql=$("#sqlt
 $("#run").onclick=runSql;$("#sqltext").addEventListener("keydown",e=>{if(e.ctrlKey&&e.key==="Enter")runSql()});
 $("#csv").onclick=async()=>{const r=await fetch("/api/sql_csv",{method:"POST",headers:{"X-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({sql:$("#sqltext").value,allow_write:$("#allow").checked})});
  if(!r.ok)return alert((await r.json()).error);const a=h("a",{href:URL.createObjectURL(await r.blob()),download:"query.csv"});a.click()};
-$("#prof").onclick=async()=>{$("#profcard").style.display="block";$("#profile").replaceChildren(h("div",{style:"padding:.5rem"},"Profiling…"));
- try{const p=await api("/api/profile-data",{sql:$("#sqltext").value});$("#proftitle").textContent=`Profile · ${fmt(p.rows)} rows · ${p.columns.length} columns`+(p.top_sampled?" · top values from a sample":"");
-  $("#profile").replaceChildren(table(["Column","Type","Nulls","Distinct","Min","Max","Mean / avg len","Std","Median","Top values"],p.columns.map(c=>c.skipped?[c.name,c.type,"skipped"]:[c.name,c.type,
+const PCT=v=>v==null?"":fmt(v)+"%";
+function bars(rows,lab,val,cls){const mx=Math.max(1,...rows.map(val));return h("div",{},rows.map(r=>h("div",{style:"display:flex;gap:.5rem;align-items:center"},h("span",{class:"mono",style:"flex:0 0 150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap",title:String(lab(r))},String(lab(r))),
+  h("div",{class:"bar"+(cls?" "+cls:""),style:"flex:1"},h("i",{style:`width:${100*val(r)/mx}%`})),h("span",{class:"mute",style:"flex:0 0 70px;text-align:right"},fmt(val(r))))))}
+function kv(o){return table(["Measure","Value"],Object.entries(o).filter(([k,v])=>v!=null&&typeof v!=="object").map(([k,v])=>[k.replace(/_/g," "),fmt(v)]))}
+function deepPanel(c){const s=[h("h3",{style:"margin:.2rem 0"},c.column," ",h("span",{class:"pill"},c.type))];
+ s.push(h("div",{class:"mute"},`${fmt(c.rows)} rows · ${fmt(c.non_null)} filled · ${PCT(c.null_pct)} empty · ${fmt(c.distinct)} distinct (${PCT(c.unique_pct)} unique)`+(c.is_key_candidate?" · could be a key":"")));
+ if(c.issues&&c.issues.length)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Things to check"),h("ul",{style:"margin:.2rem 0 .2rem 1.2rem"},c.issues.map(i=>h("li",{class:"bad"},i)))));
+ else s.push(h("div",{class:"mute",style:"margin:.4rem 0"},"No data-quality flags."));
+ const cols=[];
+ if(c.stats)cols.push(h("div",{style:"flex:1 1 260px"},h("b",{},"Statistics"),kv(c.stats)));
+ if(c.text)cols.push(h("div",{style:"flex:1 1 260px"},h("b",{},"Text checks"),kv({...c.text,upper:c.text.case.upper,lower:c.text.case.lower,mixed_case:c.text.case.mixed})));
+ if(c.outliers)cols.push(h("div",{style:"flex:1 1 260px"},h("b",{},"Outliers ("+c.outliers.method+")"),kv({low_fence:c.outliers.low_fence,high_fence:c.outliers.high_fence,below:c.outliers.below,above:c.outliers.above}),
+   c.outliers.extremes.length?table(["Extreme value","Rows"],c.outliers.extremes):""));
+ if(cols.length)s.push(h("div",{style:"display:flex;gap:1rem;flex-wrap:wrap;margin:.4rem 0"},cols));
+ if(c.histogram)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Distribution"),bars(c.histogram,b=>fmt(b.from)+" – "+fmt(b.to),b=>b.count)));
+ if(c.by_period)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Rows per "+c.by_period.unit),bars(c.by_period.rows,r=>r[0],r=>r[1])));
+ if(c.patterns)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},`Formats (${c.pattern_count}) `),h("span",{class:"mute"},"A = capital, a = lower case, 9 = digit"),
+   table(["Format","Rows","%","Example"],c.patterns.map(p=>[h("span",{class:"mono"},p.pattern),fmt(p.count),PCT(p.pct),p.example]))));
+ if(c.lengths&&c.lengths.length)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Most common lengths"),bars(c.lengths,r=>r[0]+" chars",r=>r[1])));
+ if(c.top_values)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Most common values "),h("span",{class:"mute"},fmt(c.rare_values)+" value(s) appear only once"),bars(c.top_values,v=>v.value,v=>v.count)));
+ if(c.by_coverholder&&c.by_coverholder.length>1)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"By coverholder"),
+   table(["Coverholder","Rows","Empty","Distinct",c.by_coverholder[0].range_is_length?"Min / max length":"Min / max"],c.by_coverholder.map(r=>[r.coverholder||"(none)",fmt(r.rows),PCT(r.null_pct),fmt(r.distinct),(r.min??"")+" … "+(r.max??"")]))));
+ return h("div",{},s)}
+async function deepColumn(src,col,card,box){card.style.display="block";box.replaceChildren(h("div",{},"Profiling "+col+"…"));card.scrollIntoView({block:"nearest"});
+ try{box.replaceChildren(deepPanel(await api("/api/profile/column",{...src,column:col})))}catch(e){box.replaceChildren(h("div",{class:"bad"},e.message))}}
+function summaryView(s,src,card,box){const f=s.flags,list=(l,t)=>l.length?h("div",{},h("b",{},t+": "),l.join(", ")):"";
+ const colLink=n=>h("a",{href:"#",on:{click:e=>{e.preventDefault();deepColumn(src,n,card,box)}}},n);
+ return h("div",{},h("div",{style:"display:flex;gap:1.2rem;flex-wrap:wrap;margin-bottom:.4rem"},[["Rows",s.rows],["Columns",s.columns],["Complete",s.completeness_pct+"%"],["Duplicate rows",s.duplicate_rows]].map(([a,b])=>h("div",{},h("div",{class:"mute"},a),h("b",{},fmt(b))))),
+  list(f.all_null,"Entirely empty"),list(f.constant,"Constant"),list(f.mostly_null,"50%+ empty"),list(f.key_candidates,"Could be keys"),
+  s.by_coverholder.length?h("div",{style:"margin:.3rem 0"},h("b",{},"Rows per coverholder: "),s.by_coverholder.map(r=>(r.coverholder||"(none)")+" "+fmt(r.rows)).join(" · ")):"",
+  h("div",{class:"scroll",style:"margin-top:.4rem"},table(["Column","Type","Nulls","Distinct","Min","Max","Mean / avg len","Std","Median","Top values"],s.column_stats.map(c=>c.skipped?[c.name,c.type,"skipped"]:[colLink(c.name),c.type,
    h("div",{},fmt(c.nulls)+" ("+c.null_pct+"%)",h("div",{class:"bar n"},h("i",{style:`width:${c.null_pct}%`}))),fmt(c.distinct)+" ("+c.distinct_pct+"%)",c.min,c.max,c.mean!=null?fmt(c.mean):c.avg_len!=null?fmt(c.avg_len)+" chars":"",c.std!=null?fmt(c.std):"",c.median!=null?fmt(c.median):"",
-   (c.top||[]).map(t=>h("div",{},h("span",{class:"mono"},t.value.length>40?t.value.slice(0,40)+"…":t.value)," ",h("span",{class:"mute"},fmt(t.count)+" · "+t.pct+"%")))])))}
+   (c.top||[]).map(t=>h("div",{},h("span",{class:"mono"},t.value.length>40?t.value.slice(0,40)+"…":t.value)," ",h("span",{class:"mute"},fmt(t.count)+" · "+t.pct+"%")))]))))}
+$("#prof").onclick=async()=>{$("#profcard").style.display="block";$("#deepcard").style.display="none";$("#profile").replaceChildren(h("div",{style:"padding:.5rem"},"Profiling…"));
+ try{const src={sql:$("#sqltext").value},s=await api("/api/profile/summary",src);$("#proftitle").textContent="Table summary · click a column for an in-depth profile"+(s.top_sampled?" · top values from a sample":"");
+  $("#profile").replaceChildren(summaryView(s,src,$("#deepcard"),$("#deep")))}
  catch(e){$("#profile").replaceChildren(h("div",{class:"bad",style:"padding:.5rem"},e.message))}};
+$("#pfgo").onclick=async()=>{if(!PCUR||!PCUR.pipeline_id){$("#pfmsg").textContent="Save the pipeline first";return}
+ $("#pfmsg").textContent="profiling…";$("#pfmsg").className="mute";const ch=$("#pfch").value;
+ try{const r=await api("/api/profile/pipeline",{pipeline_id:PCUR.pipeline_id,coverholder:ch});$("#pfmsg").textContent="saved a snapshot of each stage";
+  $("#pfout").replaceChildren(...r.stages.map(s=>{const card=h("div",{style:"display:none;margin:.5rem 0;padding:.5rem;border:1px solid var(--line);border-radius:6px"}),box=h("div");card.append(box);
+   if(s.error)return h("div",{style:"margin:.6rem 0"},h("b",{},s.stage)," ",h("span",{class:"mono"},s.table)," ",h("span",{class:"bad"},s.error));
+   const delta=(s.added_columns&&s.added_columns.length?" · adds "+s.added_columns.join(", "):"")+(s.dropped_columns&&s.dropped_columns.length?" · drops "+s.dropped_columns.join(", "):"");
+   return h("details",{style:"margin:.6rem 0"},h("summary",{},h("b",{},s.stage)," ",h("span",{class:"mono"},s.table),h("span",{class:"mute"}," · "+fmt(s.rows)+" rows · "+s.columns+" columns · "+s.completeness_pct+"% complete"+delta)),
+    summaryView(s,{table:s.table,coverholder:ch},card,box),card)}))}
+ catch(e){$("#pfmsg").textContent=e.message;$("#pfmsg").className="bad"}};
 $("#xgo").onclick=async()=>{$("#xmsg").textContent="exporting…";$("#xmsg").className="mute";
  try{const r=await api("/api/export/databricks",{out:$("#xout").value,volume_path:$("#xvol").value,catalog:$("#xcat").value,schema:$("#xsch").value,incremental:$("#xinc").checked,include_blobs:$("#xblob").checked});
   $("#xmsg").textContent=`Done → ${r.path} · ${r.tables.map(x=>x.name+" ("+fmt(x.rows)+")").join(", ")}`+(r.skipped.length?` · skipped: ${r.skipped.map(s=>s.table+" ("+s.reason+")").join(", ")}`:"");$("#xmsg").className="ok"}
@@ -274,6 +318,7 @@ $("#xgo").onclick=async()=>{$("#xmsg").textContent="exporting…";$("#xmsg").cla
 let PL=[],PCUR=null,DFS=[],CHS=[];
 const blankPipe=()=>({pipeline_id:"",name:"",stages:[],overrides:[]});
 async function initPipeline(){[DFS,CHS,PL]=await Promise.all([api("/api/dataflows"),api("/api/coverholders"),api("/api/pipelines")]);
+ $("#pfch").replaceChildren(h("option",{value:""},"all coverholders"),...CHS.filter(c=>c.name).map(c=>h("option",{value:c.name},c.name)));
  $("#chlist").replaceChildren(CHS.length?table(["Run","Coverholder","Files","Stored","Layouts","Last modified","Warnings"],CHS.map(c=>[h("input",{type:"checkbox","data-ch":c.name,disabled:!c.name||!c.stored}),c.name||h("span",{class:"mute"},"(no coverholder: lookup files etc.)"),c.files,c.stored,c.layouts,(c.last_modified||"").slice(0,19),c.warned||""])):h("div",{class:"mute",style:"padding:.5rem"},"Profile the coverholder folders first (step 1)."));
  const s=$("#pselect");s.replaceChildren(h("option",{value:""},"— new pipeline —"),...PL.map(p=>h("option",{value:p.pipeline_id},p.name)));
  if(!PCUR||!PL.find(p=>p.pipeline_id===PCUR.pipeline_id))PCUR=PL[0]?JSON.parse(JSON.stringify(PL[0])):blankPipe();s.value=PCUR.pipeline_id||"";renderPipe();refreshStatus()}

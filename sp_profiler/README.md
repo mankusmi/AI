@@ -242,3 +242,20 @@ then merge everything with a final dataflow) use the **5 · Pipeline** tab, or `
   `<output>__<coverholder>` by entity name, then by coverholder name. Anything that cannot be matched is shown on the Map & load tab
   ("Sources this dataflow reads"); **Bind** it explicitly (`Query::Step`).
 * Limit: stage 1 entities that share a name across dataflows share layout mappings; give them distinct names.
+
+## Advanced profiling (per table, per column, per stage)
+
+* **Query & profile tab → "Profile result"** now opens a *table summary* (rows, columns, completeness, duplicate rows, entirely-empty /
+  constant / mostly-empty columns, columns that could be keys, rows per coverholder) above the per-column table. **Click a column name**
+  for an in-depth profile.
+* **Column profile**: top values and rare values; numbers (percentiles p1-p99, skew/kurtosis, IQR outliers with the most extreme values, histogram);
+  dates (span, rows per month/year, future dates, weekends); text (formats such as `AA-999`, length distribution, leading/trailing spaces,
+  placeholders like N/A or `-`, values differing only by case or spaces, numeric-/date-looking text, non-ASCII, case style); a
+  "things to check" list; and a breakdown **per coverholder** (empty %, distinct, min/max) when the table has `_coverholder`.
+* **Pipeline tab → "Profile every stage"** summarises each stage's output table (all coverholders or one), shows the columns a stage
+  adds or drops, lets you drill into any column, and **saves a snapshot** per stage in `profile_snapshots`
+  (`SELECT * FROM profile_snapshots ORDER BY taken_utc DESC` to compare runs).
+* From the command line: `sp-profile profile-stages --name "My pipeline" [--coverholder ACME] [--column Class Premium]`, or
+  `sp-profile pipeline-run --name ... --profile` to profile every stage right after a run.
+
+Profiling runs only SELECTs inside your local DuckDB; nothing leaves the laptop.

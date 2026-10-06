@@ -24,6 +24,20 @@ from .stats import human_size
 log = logging.getLogger("sp_profiler")
 
 
+def _print_stage_profiles(prof: dict) -> None:
+    for s in prof["stages"]:
+        if s.get("error"):
+            print(f"{s['stage']:20s} {s['table']}: {s['error']}")
+            continue
+        print(f"{s['stage']:20s} {s['table']}: {s['rows']} rows, {s['columns']} columns, {s['completeness_pct']}% complete, "
+              f"{s['duplicate_rows']} duplicate rows")
+        for k, label in (("all_null", "all empty"), ("constant", "constant"), ("mostly_null", ">=50% empty")):
+            if s["flags"][k]:
+                print(f"    {label}: {', '.join(s['flags'][k])}")
+        if s.get("added_columns") or s.get("dropped_columns"):
+            print(f"    vs previous stage: +{s.get('added_columns', [])} -{s.get('dropped_columns', [])}")
+
+
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
     p = argparse.ArgumentParser(prog="sp-profile", description=__doc__,
@@ -86,6 +100,14 @@ def main(argv=None) -> int:
     pr.add_argument("--force", action="store_true", help="redo everything, ignoring 'unchanged'")
     pr.add_argument("--allow-partial-merge", action="store_true", help="run the merge even if some coverholders are not ready")
 
+    pr.add_argument("--profile", action="store_true", help="after the run, profile every stage's output table and save a snapshot")
+
+    ps = sub.add_parser("profile-stages", help="profile the output table of every stage of a saved pipeline (and save a snapshot)")
+    ps.add_argument("--db", default="sp_profile.duckdb")
+    ps.add_argument("--name", required=True, help="pipeline name")
+    ps.add_argument("--coverholder", default="", help="only this coverholder's rows")
+    ps.add_argument("--column", nargs="*", help="also print an in-depth profile of these columns (in the last stage's table)")
+
     pl_ = sub.add_parser("pipeline-list", help="list saved pipelines and their latest status")
     pl_.add_argument("--db", default="sp_profile.duckdb")
 
@@ -98,6 +120,25 @@ def main(argv=None) -> int:
     if a.source == "serve":
         from .webapp import serve
         serve(a.db, a.port, not a.no_browser)
+        return 0
+    if a.source == "profile-stages":
+        from . import pipeline as pl
+        from . import profiling as pf
+        con = open_db(a.db)
+        row = con.execute("SELECT pipeline_id FROM pipelines WHERE name = ?", [a.name]).fetchone()
+        if not row:
+            raise SystemExit(f"No pipeline named {a.name!r}")
+        _print_stage_profiles(pf.profile_pipeline(con, row[0], a.coverholder))
+        if a.column:
+            last = [s for s in pl.get_pipeline(con, row[0])["stages"] if s["output_table"]][-1]
+            for col in a.column:
+                cp = pf.column_profile(con, pf.source_sql(last["output_table"], coverholder=a.coverholder), col)
+                print(f"\n{last['output_table']}.{col} ({cp['type']}): {cp['rows']} rows, {cp['null_pct']}% empty, {cp['distinct']} distinct")
+                for i in cp["issues"]:
+                    print(f"  ! {i}")
+                for tv in cp.get("top_values", [])[:10]:
+                    print(f"    {tv['value']!r:30} {tv['count']} ({tv['pct']}%)")
+        con.close()
         return 0
     if a.source in ("pipeline-run", "pipeline-list"):
         from . import pipeline as pl
@@ -115,6 +156,9 @@ def main(argv=None) -> int:
                              f"{[p['name'] for p in pl.list_pipelines(con)]}")
         rep = pl.run_pipeline(con, row[0], a.coverholder or None, a.force, a.allow_partial_merge,
                               lambda n, total, msg: log.info("[%d/%d] %s", n, total, msg))
+        if a.profile:
+            from . import profiling as pf
+            _print_stage_profiles(pf.profile_pipeline(con, row[0], run_id=rep.get("run_id", "")))
         con.close()
         print(f"\nPipeline {a.name!r}: {rep['status']}")
         for ch, c in rep["coverholders"].items():

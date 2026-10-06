@@ -76,6 +76,24 @@ def test_per_coverholder_pipeline_in_a_browser(world, tmp_path):  # noqa: F811
             pg.wait_for_selector("#mtransform :text('Sources this dataflow reads')")
             sources = pg.inner_text("#mtransform")
             assert "matched automatically" in sources and "df_enriched__acme" in sources and "df_enriched__beta" in sources
+
+            # advanced profiling: every stage's table, then one column in depth
+            pg.click("nav button[data-t=pipe]")
+            pg.wait_for_selector("#pfch option:has-text('ACME')", state="attached")
+            pg.click("#pfgo")
+            pg.wait_for_selector("#pfout summary:has-text('df_final')")
+            assert "4 rows" in pg.inner_text("#pfout summary >> nth=1")
+            pg.click("#pfout summary >> nth=1")
+            pg.click("#pfout details[open] a:text-is('Class')")
+            pg.wait_for_selector("#pfout details[open] :text('Most common values')")
+            deep = pg.inner_text("#pfout details[open]")
+            assert "differ only by case" in deep and "PROPERTY" in deep and "By coverholder" in deep
+            pg.click("nav button[data-t=sql]")
+            pg.fill("#sqltext", "SELECT * FROM df_enriched")
+            pg.click("#prof")
+            pg.click("#profile a:text-is('Premium')")
+            pg.wait_for_selector("#deep :text('Statistics')")
+            assert "Rows per coverholder" in pg.inner_text("#profile") and "p95" in pg.inner_text("#deep")
             browser.close()
     finally:
         srv.shutdown()
