@@ -259,3 +259,10 @@ then merge everything with a final dataflow) use the **5 · Pipeline** tab, or `
   `sp-profile pipeline-run --name ... --profile` to profile every stage right after a run.
 
 Profiling runs only SELECTs inside your local DuckDB; nothing leaves the laptop.
+
+**Charts.** Column profiles draw charts that suit the data type (inline SVG, nothing loaded from outside; light and dark themes; hover
+tooltips): numbers get a distribution histogram and a box plot (middle half, median, 5th-95th percentile whiskers, extremes flagged);
+dates get rows per month/year (a line when there are many periods); text gets most common values, a length distribution, formats,
+"what the text looks like" (numeric/date-looking, placeholders) and letter case; true/false columns get a split bar. Every column also
+gets a filled-vs-empty bar, and tables with `_coverholder` get rows and empty % per coverholder. "Show charts for every column" draws
+a card per column (first 60) from the table summary.

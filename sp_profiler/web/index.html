@@ -19,7 +19,7 @@ input[type=text]{width:100%}textarea{width:100%;font:13px ui-monospace,Consolas,
 table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid var(--line);padding:3px 8px;text-align:left;vertical-align:top;white-space:nowrap}
 th{position:sticky;top:0;background:var(--panel);font-weight:600}.scroll{overflow:auto;max-height:60vh;border:1px solid var(--line);border-radius:6px}
 .fs li{list-style:none;padding:2px 6px;cursor:pointer;display:flex;gap:.5rem;align-items:center;border-radius:4px}.fs li:hover{background:var(--acc2)}.fs{margin:0;padding:0}
-.mute{color:var(--mute)}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.mono{font-family:ui-monospace,Consolas,monospace}
+.mute{color:var(--mute)}a{color:var(--acc)}.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.mono{font-family:ui-monospace,Consolas,monospace}
 .bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;min-width:80px}.bar i{display:block;height:100%;background:var(--acc)}
 .bar.n i{background:var(--bad)}.pill{display:inline-block;padding:0 .5rem;border-radius:99px;background:var(--acc2);color:var(--acc);font-size:12px}
 .prog{height:10px;background:var(--line);border-radius:5px;overflow:hidden}.prog i{display:block;height:100%;background:var(--acc);transition:width .2s}
@@ -265,28 +265,102 @@ $("#run").onclick=runSql;$("#sqltext").addEventListener("keydown",e=>{if(e.ctrlK
 $("#csv").onclick=async()=>{const r=await fetch("/api/sql_csv",{method:"POST",headers:{"X-Token":TOKEN,"Content-Type":"application/json"},body:JSON.stringify({sql:$("#sqltext").value,allow_write:$("#allow").checked})});
  if(!r.ok)return alert((await r.json()).error);const a=h("a",{href:URL.createObjectURL(await r.blob()),download:"query.csv"});a.click()};
 const PCT=v=>v==null?"":fmt(v)+"%";
-function bars(rows,lab,val,cls){const mx=Math.max(1,...rows.map(val));return h("div",{},rows.map(r=>h("div",{style:"display:flex;gap:.5rem;align-items:center"},h("span",{class:"mono",style:"flex:0 0 150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap",title:String(lab(r))},String(lab(r))),
-  h("div",{class:"bar"+(cls?" "+cls:""),style:"flex:1"},h("i",{style:`width:${100*val(r)/mx}%`})),h("span",{class:"mute",style:"flex:0 0 70px;text-align:right"},fmt(val(r))))))}
+// ---------- charts (inline SVG: nothing is loaded from outside)
+const NS="http://www.w3.org/2000/svg";
+function sv(tag,attrs,...kids){const e=document.createElementNS(NS,tag);for(const[k,v]of Object.entries(attrs||{}))e.setAttribute(k,v);for(const c of kids.flat())if(c!=null)e.append(c);return e}
+const TIP=h("div",{style:"position:fixed;display:none;pointer-events:none;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:.25rem .5rem;font-size:12px;z-index:50;box-shadow:0 2px 8px rgba(0,0,0,.18);max-width:320px"});document.body.append(TIP);
+const hideTip=()=>{TIP.style.display="none"};
+function hover(el,label,value){el.setAttribute("tabindex","0");const show=e=>{TIP.replaceChildren(h("b",{},String(value)),h("span",{class:"mute"},"  "+label));TIP.style.display="block";const r=el.getBoundingClientRect(),x=e.clientX||r.left,y=e.clientY||r.top;TIP.style.left=Math.max(4,Math.min(innerWidth-TIP.offsetWidth-8,x+12))+"px";TIP.style.top=(y+16)+"px";el.style.opacity=".8"};
+ el.addEventListener("pointermove",show);el.addEventListener("focus",show);const off=()=>{hideTip();el.style.opacity=""};el.addEventListener("pointerleave",off);el.addEventListener("blur",off)}
+const AX="stroke:var(--line);stroke-width:1",TX="fill:var(--mute);font-size:10px";
+function topRound(x,y,w,hh,r){r=Math.min(r,w/2,hh);return `M${x},${y+hh}V${y+r}Q${x},${y} ${x+r},${y}H${x+w-r}Q${x+w},${y} ${x+w},${y+r}V${y+hh}Z`}
+function frame(W,H){return sv("svg",{viewBox:`0 0 ${W} ${H}`,role:"img",style:`width:100%;max-width:${W+40}px;height:auto;display:block`})}
+function colChart(items,o={}){const W=480,H=o.h||150,L=o.compact?34:44,R=8,T=8,B=o.compact?16:22,iw=W-L-R,ih=H-T-B,n=items.length,svg=frame(W,H);
+ if(!n)return h("div",{class:"mute"},"No data");const mx=Math.max(1,...items.map(i=>i.v)),slot=iw/n,bw=Math.min(24,Math.max(2,slot-2));
+ svg.append(sv("line",{x1:L,x2:W-R,y1:T+ih,y2:T+ih,style:AX}),sv("line",{x1:L,x2:W-R,y1:T,y2:T,style:AX+";opacity:.5"}),
+  sv("text",{x:L-4,y:T+4,"text-anchor":"end",style:TX},fmt(mx)),sv("text",{x:L-4,y:T+ih,"text-anchor":"end",style:TX},"0"));
+ items.forEach((it,k)=>{const x=L+k*slot+(slot-bw)/2,hh=ih*it.v/mx;
+  if(it.v>0)svg.append(sv("path",{d:topRound(x,T+ih-hh,bw,hh,4),style:"fill:var(--acc)"}));
+  const hit=sv("rect",{x:L+k*slot,y:T,width:slot,height:ih,style:"fill:transparent"});hover(hit,it.label,fmt(it.v));svg.append(hit)});
+ const lab=(k,anchor)=>sv("text",{x:anchor==="end"?W-R:anchor==="start"?L:L+k*slot+slot/2,y:H-4,"text-anchor":anchor,style:TX},String(anchor==="end"&&items[k].axEnd!=null?items[k].axEnd:items[k].ax!=null?items[k].ax:items[k].label).slice(0,16));
+ svg.append(lab(0,"start"));if(n>1)svg.append(lab(n-1,"end"));if(n>6&&!o.compact)svg.append(lab(Math.floor(n/2),"middle"));
+ return svg}
+function lineChart(items,o={}){const W=480,H=o.h||150,L=o.compact?34:44,R=8,T=8,B=o.compact?16:22,iw=W-L-R,ih=H-T-B,n=items.length,svg=frame(W,H),mx=Math.max(1,...items.map(i=>i.v));
+ const X=k=>L+(n<2?iw/2:iw*k/(n-1)),Y=v=>T+ih-ih*v/mx,pts=items.map((it,k)=>`${X(k)},${Y(it.v)}`).join(" ");
+ svg.append(sv("line",{x1:L,x2:W-R,y1:T+ih,y2:T+ih,style:AX}),sv("text",{x:L-4,y:T+4,"text-anchor":"end",style:TX},fmt(mx)),sv("text",{x:L-4,y:T+ih,"text-anchor":"end",style:TX},"0"),
+  sv("polygon",{points:`${X(0)},${T+ih} ${pts} ${X(n-1)},${T+ih}`,style:"fill:var(--acc);opacity:.12"}),sv("polyline",{points:pts,style:"fill:none;stroke:var(--acc);stroke-width:2;stroke-linejoin:round"}),
+  sv("text",{x:L,y:H-4,"text-anchor":"start",style:TX},String(items[0].label)),sv("text",{x:W-R,y:H-4,"text-anchor":"end",style:TX},String(items[n-1].label)));
+ const cross=sv("line",{y1:T,y2:T+ih,style:"stroke:var(--mute);stroke-width:1;display:none"}),dot=sv("circle",{r:4,style:"fill:var(--acc);stroke:var(--panel);stroke-width:2;display:none"});
+ const hit=sv("rect",{x:L,y:T,width:iw,height:ih,style:"fill:transparent"});
+ hit.addEventListener("pointermove",e=>{const r=svg.getBoundingClientRect(),px=(e.clientX-r.left)*W/r.width,k=Math.max(0,Math.min(n-1,Math.round((px-L)/iw*(n-1))));
+  cross.setAttribute("x1",X(k));cross.setAttribute("x2",X(k));cross.style.display="";dot.setAttribute("cx",X(k));dot.setAttribute("cy",Y(items[k].v));dot.style.display="";
+  TIP.replaceChildren(h("b",{},fmt(items[k].v)),h("span",{class:"mute"},"  "+items[k].label));TIP.style.display="block";TIP.style.left=Math.min(innerWidth-TIP.offsetWidth-8,e.clientX+12)+"px";TIP.style.top=(e.clientY+16)+"px"});
+ hit.addEventListener("pointerleave",()=>{hideTip();cross.style.display="none";dot.style.display="none"});svg.append(cross,dot,hit);return svg}
+const SHADES=["var(--acc)","color-mix(in srgb,var(--acc) 55%,var(--panel))","color-mix(in srgb,var(--acc) 28%,var(--panel))","var(--line)","var(--mute)"];
+function stackBar(parts,o={}){parts=parts.filter(p=>p.v>0);const tot=parts.reduce((a,p)=>a+p.v,0);if(!tot)return h("div",{class:"mute"},"No data");const W=480,H=o.thin?10:22,svg=frame(W,H);let x=0;
+ parts.forEach((p,k)=>{const w=W*p.v/tot,r=sv("rect",{x:x+(k?1:0),y:0,width:Math.max(1,w-(k?1:0)-(k<parts.length-1?1:0)),height:H,rx:o.thin?3:4,style:"fill:"+SHADES[Math.min(k,SHADES.length-1)]});hover(r,p.label,fmt(p.v)+" · "+(100*p.v/tot).toFixed(1)+"%");svg.append(r);x+=w});
+ return h("div",{},svg,o.thin?"":h("div",{class:"mute",style:"display:flex;gap:.9rem;flex-wrap:wrap;margin-top:.2rem"},parts.map((p,k)=>h("span",{},h("span",{style:`display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;background:${SHADES[Math.min(k,SHADES.length-1)]}`}),p.label+" "+fmt(p.v)+" ("+(100*p.v/tot).toFixed(1)+"%)"))))}
+function boxPlot(s,o){const W=480,H=78,L=12,R=12,svg=frame(W,H);let lo=s.p1,hi=s.p99;if(!(hi>lo)){lo=s.min;hi=s.max}if(!(hi>lo))return h("div",{class:"mute"},"All values are "+fmt(s.min));
+ const pad=(hi-lo)*.04;lo-=pad;hi+=pad;const X=v=>L+(W-L-R)*(Math.max(lo,Math.min(hi,v))-lo)/(hi-lo),cy=30;
+ svg.append(sv("line",{x1:X(s.p5),x2:X(s.p95),y1:cy,y2:cy,style:"stroke:var(--acc);stroke-width:2"}),sv("line",{x1:X(s.p1),x2:X(s.p1),y1:cy-6,y2:cy+6,style:"stroke:var(--acc);stroke-width:2"}),sv("line",{x1:X(s.p99),x2:X(s.p99),y1:cy-6,y2:cy+6,style:"stroke:var(--acc);stroke-width:2"}));
+ const box=sv("rect",{x:X(s.p25),y:cy-12,width:Math.max(2,X(s.p75)-X(s.p25)),height:24,rx:4,style:"fill:var(--acc);opacity:.28"});hover(box,"middle half of the values",fmt(s.p25)+" – "+fmt(s.p75));
+ svg.append(box,sv("line",{x1:X(s.median),x2:X(s.median),y1:cy-12,y2:cy+12,style:"stroke:var(--acc);stroke-width:3"}));
+ if(s.min<s.p1)svg.append(sv("circle",{cx:L+3,cy:cy,r:4,style:"fill:var(--bad);stroke:var(--panel);stroke-width:2"}),sv("text",{x:L,y:cy-14,"text-anchor":"start",style:TX},"min "+fmt(s.min)))
+ if(s.max>s.p99){svg.append(sv("circle",{cx:W-R-3,cy:cy,r:4,style:"fill:var(--bad);stroke:var(--panel);stroke-width:2"}),sv("text",{x:W-R,y:cy-14,"text-anchor":"end",style:TX},"max "+fmt(s.max)))}
+ [["p25",s.p25],["median",s.median],["p75",s.p75]].forEach(([n,v],k)=>svg.append(sv("text",{x:[X(v)-2,X(v),X(v)+2][k],y:H-8,"text-anchor":["end","middle","start"][k],style:TX},n+" "+fmt(v))));
+ return svg}
+function bars(rows,lab,val,cls,compact){const mx=Math.max(1,...rows.map(val));return h("div",{},rows.map(r=>{const row=h("div",{style:"display:flex;gap:.5rem;align-items:center;margin:1px 0"},h("span",{class:"mono",style:`flex:0 0 ${compact?"38%":"150px"};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap`},String(lab(r))),
+  h("div",{class:"bar"+(cls?" "+cls:""),style:"flex:1;min-width:20px"},h("i",{style:`width:${100*val(r)/mx}%`})),h("span",{class:"mute",style:"flex:0 0 auto;min-width:3ch;text-align:right"},fmt(val(r))));hover(row,String(lab(r)),fmt(val(r)));return row}))}
 function kv(o){return table(["Measure","Value"],Object.entries(o).filter(([k,v])=>v!=null&&typeof v!=="object").map(([k,v])=>[k.replace(/_/g," "),fmt(v)]))}
+const fig=(title,sub,body)=>h("div",{style:"margin:.6rem 0"},h("b",{},title),sub?h("span",{class:"mute"},"  "+sub):"",body);
+function completeness(c,thin){return stackBar([{label:"Filled",v:c.non_null},{label:"Empty",v:c.nulls}],{thin})}
+// the chart(s) that suit this column's data type
+function lengthSeries(rows){const m=new Map(rows.map(r=>[r[0],r[1]])),ks=[...m.keys()],lo=Math.min(...ks),hi=Math.min(Math.max(...ks),lo+59),out=[];for(let l=lo;l<=hi;l++)out.push({label:l+" chars",ax:String(l),v:m.get(l)||0});return out}
+const byValue=a=>a.slice().sort((x,y)=>y.v-x.v);
+function typeCharts(c,compact){const s=[];
+ if(c.kind==="number"&&c.stats){if(c.histogram)s.push(fig("Distribution",compact?"":"rows per value range",colChart(c.histogram.map(b=>({label:fmt(b.from)+" – "+fmt(b.to),ax:fmt(b.from),axEnd:fmt(b.to),v:b.count})),{h:compact?96:150,compact})));
+  if(!compact)s.push(fig("Spread","box = middle half, line = median, whiskers = 5th–95th percentile, red dot = extreme beyond the 1st/99th",boxPlot(c.stats,c.outliers)));}
+ else if(c.kind==="date"&&c.by_period){const it=c.by_period.rows.map(r=>({label:r[0],v:r[1]}));
+  s.push(fig("Rows per "+c.by_period.unit,"",it.length>36?lineChart(it,{h:compact?96:150,compact}):colChart(it,{h:compact?96:150,compact})));}
+ else if(c.kind==="boolean"&&c.top_values)s.push(fig("True / false","",stackBar(c.top_values.map(v=>({label:v.value,v:v.count})))));
+ else if(c.kind==="text"){if(c.top_values)s.push(fig(compact?"Most common values":"Most common values",c.rare_values?fmt(c.rare_values)+" value(s) appear only once":"",bars(c.top_values.slice(0,compact?5:c.distinct>50?10:20),v=>v.value,v=>v.count,"",compact)));
+  if(!compact&&c.lengths&&c.lengths.length>1)s.push(fig("Text length","characters",colChart(lengthSeries(c.lengths),{h:120})));}
+ else if(c.top_values&&!compact)s.push(fig("Most common values","",bars(c.top_values,v=>v.value,v=>v.count)));
+ return s}
 function deepPanel(c){const s=[h("h3",{style:"margin:.2rem 0"},c.column," ",h("span",{class:"pill"},c.type))];
  s.push(h("div",{class:"mute"},`${fmt(c.rows)} rows · ${fmt(c.non_null)} filled · ${PCT(c.null_pct)} empty · ${fmt(c.distinct)} distinct (${PCT(c.unique_pct)} unique)`+(c.is_key_candidate?" · could be a key":"")));
+ s.push(h("div",{style:"margin:.4rem 0;max-width:520px"},completeness(c)));
  if(c.issues&&c.issues.length)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Things to check"),h("ul",{style:"margin:.2rem 0 .2rem 1.2rem"},c.issues.map(i=>h("li",{class:"bad"},i)))));
  else s.push(h("div",{class:"mute",style:"margin:.4rem 0"},"No data-quality flags."));
+ s.push(h("div",{style:"display:flex;gap:1.5rem;flex-wrap:wrap"},typeCharts(c,false).map(f=>{f.style.flex="1 1 380px";f.style.maxWidth="560px";return f})));
+ if(c.text){const t=c.text,nn=c.non_null;s.push(h("div",{style:"display:flex;gap:1.5rem;flex-wrap:wrap"},
+  fig("What the text looks like","",stackBar(byValue([{label:"Numeric-looking",v:t.numeric_like},{label:"Date-looking",v:t.date_like},{label:"Placeholder (N/A, -)",v:Math.max(0,t.null_like-t.blank)},{label:"Blank",v:t.blank},
+   {label:"Other text",v:Math.max(0,nn-t.numeric_like-t.date_like-t.null_like)}]))),
+  fig("Letter case","",stackBar(byValue([{label:"UPPER",v:t.case.upper},{label:"lower",v:t.case.lower},{label:"Mixed",v:t.case.mixed},{label:"No letters",v:Math.max(0,nn-t.case.upper-t.case.lower-t.case.mixed)}]))))
+  );s[s.length-1].childNodes.forEach(f=>{f.style.flex="1 1 380px";f.style.maxWidth="560px"})}
  const cols=[];
  if(c.stats)cols.push(h("div",{style:"flex:1 1 260px"},h("b",{},"Statistics"),kv(c.stats)));
  if(c.text)cols.push(h("div",{style:"flex:1 1 260px"},h("b",{},"Text checks"),kv({...c.text,upper:c.text.case.upper,lower:c.text.case.lower,mixed_case:c.text.case.mixed})));
  if(c.outliers)cols.push(h("div",{style:"flex:1 1 260px"},h("b",{},"Outliers ("+c.outliers.method+")"),kv({low_fence:c.outliers.low_fence,high_fence:c.outliers.high_fence,below:c.outliers.below,above:c.outliers.above}),
    c.outliers.extremes.length?table(["Extreme value","Rows"],c.outliers.extremes):""));
  if(cols.length)s.push(h("div",{style:"display:flex;gap:1rem;flex-wrap:wrap;margin:.4rem 0"},cols));
- if(c.histogram)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Distribution"),bars(c.histogram,b=>fmt(b.from)+" – "+fmt(b.to),b=>b.count)));
- if(c.by_period)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Rows per "+c.by_period.unit),bars(c.by_period.rows,r=>r[0],r=>r[1])));
- if(c.patterns)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},`Formats (${c.pattern_count}) `),h("span",{class:"mute"},"A = capital, a = lower case, 9 = digit"),
-   table(["Format","Rows","%","Example"],c.patterns.map(p=>[h("span",{class:"mono"},p.pattern),fmt(p.count),PCT(p.pct),p.example]))));
- if(c.lengths&&c.lengths.length)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Most common lengths"),bars(c.lengths,r=>r[0]+" chars",r=>r[1])));
- if(c.top_values)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"Most common values "),h("span",{class:"mute"},fmt(c.rare_values)+" value(s) appear only once"),bars(c.top_values,v=>v.value,v=>v.count)));
- if(c.by_coverholder&&c.by_coverholder.length>1)s.push(h("div",{style:"margin:.4rem 0"},h("b",{},"By coverholder"),
-   table(["Coverholder","Rows","Empty","Distinct",c.by_coverholder[0].range_is_length?"Min / max length":"Min / max"],c.by_coverholder.map(r=>[r.coverholder||"(none)",fmt(r.rows),PCT(r.null_pct),fmt(r.distinct),(r.min??"")+" … "+(r.max??"")]))));
+ if(c.patterns)s.push(fig(`Formats (${c.pattern_count})`,"A = capital, a = lower case, 9 = digit",bars(c.patterns,p=>p.pattern+"  e.g. "+p.example,p=>p.count)));
+ if(c.by_coverholder&&c.by_coverholder.length>1)s.push(h("div",{style:"display:flex;gap:1.5rem;flex-wrap:wrap"},
+   fig("Rows per coverholder","",bars(c.by_coverholder,r=>r.coverholder||"(none)",r=>r.rows)),
+   fig("Empty % per coverholder","",bars(c.by_coverholder,r=>r.coverholder||"(none)",r=>r.null_pct,"n"))),
+  h("div",{style:"margin:.4rem 0"},h("b",{},"By coverholder "),table(["Coverholder","Rows","Empty","Distinct",c.by_coverholder[0].range_is_length?"Min / max length":"Min / max"],c.by_coverholder.map(r=>[r.coverholder||"(none)",fmt(r.rows),PCT(r.null_pct),fmt(r.distinct),(r.min??"")+" … "+(r.max??"")]))));
  return h("div",{},s)}
+// a card per column, each with the chart that suits its type
+async function chartsForAll(src,names,types,box,btn){const gen=box._gen=(box._gen||0)+1,cap=60,list=names.slice(0,cap);btn.disabled=true;
+ box.replaceChildren(h("div",{class:"mute"},"Drawing charts…"));const grid=h("div",{style:"display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:.8rem"});box.append(grid);
+ for(let k=0;k<list.length;k++){if(box._gen!==gen)return;box.firstChild.textContent=`Drawing charts… ${k}/${list.length}`;
+  const card=h("div",{style:"border:1px solid var(--line);border-radius:8px;padding:.6rem;min-width:0"});grid.append(card);
+  try{const c=await api("/api/profile/column",{...src,column:list[k]});if(box._gen!==gen)return;
+   card.append(h("div",{style:"display:flex;justify-content:space-between;gap:.5rem"},h("b",{style:"overflow:hidden;text-overflow:ellipsis"},c.column),h("span",{class:"pill"},c.type)),
+    h("div",{class:"mute"},`${PCT(c.null_pct)} empty · ${fmt(c.distinct)} distinct`),h("div",{style:"margin:.3rem 0"},completeness(c,true)),...typeCharts(c,true),
+    c.issues&&c.issues.length?h("div",{class:"bad",style:"font-size:12px"},"! "+c.issues[0]+(c.issues.length>1?` (+${c.issues.length-1} more)`:"")):"")}
+  catch(e){card.append(h("b",{},list[k]),h("div",{class:"bad"},e.message))}}
+ box.firstChild.textContent=names.length>cap?`Charts for the first ${cap} of ${names.length} columns. Click a column name in the table for any other.`:`Charts for ${list.length} column(s).`;btn.disabled=false}
 async function deepColumn(src,col,card,box){card.style.display="block";box.replaceChildren(h("div",{},"Profiling "+col+"…"));card.scrollIntoView({block:"nearest"});
  try{box.replaceChildren(deepPanel(await api("/api/profile/column",{...src,column:col})))}catch(e){box.replaceChildren(h("div",{class:"bad"},e.message))}}
 function summaryView(s,src,card,box){const f=s.flags,list=(l,t)=>l.length?h("div",{},h("b",{},t+": "),l.join(", ")):"";
@@ -294,6 +368,7 @@ function summaryView(s,src,card,box){const f=s.flags,list=(l,t)=>l.length?h("div
  return h("div",{},h("div",{style:"display:flex;gap:1.2rem;flex-wrap:wrap;margin-bottom:.4rem"},[["Rows",s.rows],["Columns",s.columns],["Complete",s.completeness_pct+"%"],["Duplicate rows",s.duplicate_rows]].map(([a,b])=>h("div",{},h("div",{class:"mute"},a),h("b",{},fmt(b))))),
   list(f.all_null,"Entirely empty"),list(f.constant,"Constant"),list(f.mostly_null,"50%+ empty"),list(f.key_candidates,"Could be keys"),
   s.by_coverholder.length?h("div",{style:"margin:.3rem 0"},h("b",{},"Rows per coverholder: "),s.by_coverholder.map(r=>(r.coverholder||"(none)")+" "+fmt(r.rows)).join(" · ")):"",
+  (()=>{const box=h("div",{style:"margin:.5rem 0"}),btn=h("button",{class:"b",on:{click:()=>chartsForAll(src,s.column_stats.filter(c=>!c.skipped).map(c=>c.name),null,box,btn)}},"Show charts for every column");return h("div",{style:"margin:.5rem 0"},btn,box)})(),
   h("div",{class:"scroll",style:"margin-top:.4rem"},table(["Column","Type","Nulls","Distinct","Min","Max","Mean / avg len","Std","Median","Top values"],s.column_stats.map(c=>c.skipped?[c.name,c.type,"skipped"]:[colLink(c.name),c.type,
    h("div",{},fmt(c.nulls)+" ("+c.null_pct+"%)",h("div",{class:"bar n"},h("i",{style:`width:${c.null_pct}%`}))),fmt(c.distinct)+" ("+c.distinct_pct+"%)",c.min,c.max,c.mean!=null?fmt(c.mean):c.avg_len!=null?fmt(c.avg_len)+" chars":"",c.std!=null?fmt(c.std):"",c.median!=null?fmt(c.median):"",
    (c.top||[]).map(t=>h("div",{},h("span",{class:"mono"},t.value.length>40?t.value.slice(0,40)+"…":t.value)," ",h("span",{class:"mute"},fmt(t.count)+" · "+t.pct+"%")))]))))}

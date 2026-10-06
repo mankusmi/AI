@@ -94,6 +94,10 @@ def test_per_coverholder_pipeline_in_a_browser(world, tmp_path):  # noqa: F811
             pg.click("#profile a:text-is('Premium')")
             pg.wait_for_selector("#deep :text('Statistics')")
             assert "Rows per coverholder" in pg.inner_text("#profile") and "p95" in pg.inner_text("#deep")
+            assert pg.locator("#deep svg").count() >= 2                      # completeness bar + distribution/spread charts
+            pg.click("#profile button:text('Show charts for every column')")
+            pg.wait_for_selector("#profile :text('column(s).')", timeout=20000)
+            assert pg.locator("#profile svg").count() >= 8                   # one chart set per column, drawn inline
             browser.close()
     finally:
         srv.shutdown()
