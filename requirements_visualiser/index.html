@@ -188,6 +188,7 @@ h4{font:600 14px var(--font-display);margin:4px 0 8px}
     <div class="actions" style="margin-top:8px">
       <button class="btn" id="copy">Copy JSON</button>
       <button class="btn" id="load">Load from box</button>
+      <button class="btn danger" id="blank">Start blank</button>
       <button class="btn danger" id="reset">Reset to sample</button>
       <span class="msg" id="ioMsg" role="status"></span>
     </div>
@@ -277,7 +278,7 @@ const KEY='req-visualiser-v1';
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S.reqs))}catch(e){}}
 function init(){
   let d=null;try{d=JSON.parse(localStorage.getItem(KEY))}catch(e){}
-  S.reqs=Array.isArray(d)&&d.length?d.map(norm):SAMPLE.map(norm);
+  S.reqs=Array.isArray(d)?d.map(norm):SAMPLE.map(norm);      // a saved empty list stays empty
 }
 const TTYPES=['Unit','Integration','UAT','Performance','Accessibility','Security'];
 const TSTAT=['Not run','Passed','Failed','Blocked'];
@@ -570,7 +571,7 @@ function reportMd(m){
   return o.trim()+'\n';
 }
 function reportView(){
-  return `<div class="rp-ctl"><label>Project name<input type="text" id="rp-name" value="${esc(S.rp.name)}"></label>
+  return `<div class="rp-ctl"><label>Project name<input type="text" id="rp-name" value="${esc(S.rp.name)}" placeholder="Project name"></label>
    <label>Week ending<input type="date" id="rp-date" value="${esc(S.rp.date)}"></label>
    <label class="wide">Commentary for the update<textarea id="rp-notes" placeholder="Headline, decisions needed, anything the numbers do not show">${esc(S.rp.notes)}</textarea></label>
    <div class="actions"><button class="btn primary" id="rpRich">Copy for email</button><button class="btn" id="rpMd">Copy as Markdown</button><button class="btn" id="rpSnap">Save snapshot for next week</button><span class="msg" id="rpMsg" role="status"></span></div></div>
@@ -595,6 +596,7 @@ function saveSnap(){
 }
 function renderView(){
   const rs=visible();
+  if(!S.reqs.length&&S.tab!=='report'){$('view').innerHTML='<div class="empty">No requirements yet. Add one with <b>+ New requirement</b>, or paste a list under Import, export and reset.</div>';return}
   $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView,tests:testsView,criteria:criteriaView,report:reportView})[S.tab](rs);
 }
 
@@ -730,7 +732,7 @@ function exportWork(){
 
 /* events */
 document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#doImport,#doExport,#copyExport,[data-addtest],[data-rmtest],[data-addac],[data-rmac],#rpRich,#rpMd,#rpSnap');if(!t)return;
+  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#blank,#doImport,#doExport,#copyExport,[data-addtest],[data-rmtest],[data-addac],[data-rmac],#rpRich,#rpMd,#rpSnap');if(!t)return;
   if(t.id==='rpRich')copyRich();else if(t.id==='rpMd')copyMd();else if(t.id==='rpSnap')saveSnap();
   else if(t.dataset.addac){readDraft();const d=S.editing.draft;let k=d.criteria.length+1;while(d.criteria.some(c=>c.id==='AC'+k))k++;
     d.criteria.push({id:'AC'+k,text:''});renderEditor();const ti=document.querySelectorAll('.ac-text');ti[ti.length-1]?.focus()}
@@ -753,8 +755,13 @@ document.addEventListener('click',e=>{
     S.editing=null;S.sel=null;save();renderAll()}
   else if(t.id==='copy'){const v=$('json').value;const done=()=>$('ioMsg').textContent='Copied to clipboard.';
     (navigator.clipboard?.writeText(v).then(done,()=>{$('json').select();$('ioMsg').textContent='Select and copy the text above.'}))||($('json').select(),$('ioMsg').textContent='Select and copy the text above.')}
-  else if(t.id==='load'){try{const d=JSON.parse($('json').value);if(!Array.isArray(d)||!d.length)throw 0;
+  else if(t.id==='load'){try{const d=JSON.parse($('json').value);if(!Array.isArray(d))throw 0;
     S.reqs=d.map(norm);S.editing=null;S.sel=null;save();renderAll();$('ioMsg').textContent=`Loaded ${S.reqs.length} requirements.`}catch(_){$('ioMsg').textContent='That is not a JSON list of requirements. Check the brackets and commas.'}}
+  else if(t.id==='blank'){
+    if(t.dataset.arm!=='1'){t.dataset.arm='1';t.textContent='Click again to clear everything';return}
+    t.textContent='Start blank';delete t.dataset.arm;
+    S.rp.name='';saveRp();
+    S.reqs=[];S.editing=null;S.sel=null;save();renderAll();$('ioMsg').textContent='Blank register ready. Add your first requirement.'}
   else if(t.id==='reset'){S.reqs=SAMPLE.map(norm);S.editing=null;S.sel=null;save();renderAll();$('ioMsg').textContent='Sample restored.'}
 });
 document.addEventListener('submit',e=>{if(e.target.id==='form'){e.preventDefault();commit()}});
