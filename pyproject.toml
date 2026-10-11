@@ -21,9 +21,10 @@ dev = ["pytest>=7.0", "ruff>=0.5", "pyarrow>=14", "playwright>=1.40",
 [project.scripts]
 pbi-profile = "pbi_profiler.cli:main"
 sp-profile = "sp_profiler.cli:main"
+devops-plan = "devops_planner.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["pbi_profiler*", "sp_profiler*"]
+include = ["pbi_profiler*", "sp_profiler*", "devops_planner*"]
 
 [tool.setuptools.package-data]
 sp_profiler = ["web/*.html"]
