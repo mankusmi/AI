@@ -2,6 +2,13 @@
 
 `index.html` is a single-file page. Open it in a browser; there is nothing to install and it makes no network calls. Data is kept in the browser's local storage.
 
+A single-page tool for keeping business requirements in one place and seeing them from several angles.
+
+- **Views:** priority board (MoSCoW), dependency map, goal traceability, acceptance criteria, test coverage, delivery pipeline, table.
+- **Checks:** flags missing goals, criteria or tests, failing builds, priority conflicts and dependency loops as you edit.
+- **Weekly report:** a formatted PM update with a Red/Amber/Green status. Copy it for email or as Markdown.
+- **Trackers:** link work items from an Azure DevOps or Jira export, and export requirements back out as CSV or a GitHub checklist.
+
 ## Start with your own data
 
 - **Blank register:** open **Import, export and reset** and click **Start blank** (click twice to confirm).
