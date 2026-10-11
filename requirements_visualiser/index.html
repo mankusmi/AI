@@ -63,7 +63,7 @@ input[type=search]{width:190px}
 .flag:hover{border-color:var(--accent)}
 .flag small{color:var(--muted);font-family:var(--font-mono);margin-right:6px}
 .mono{font-family:var(--font-mono);font-size:12px}
-.pill{display:inline-block;padding:1px 7px;font-size:11px;font-weight:600;letter-spacing:.03em;border-radius:2px}
+.pill{display:inline-block;align-self:flex-start;padding:1px 7px;font-size:11px;font-weight:600;letter-spacing:.03em;border-radius:2px}
 .p-Must{background:var(--must-bg);color:var(--must)}.p-Should{background:var(--should-bg);color:var(--should)}
 .p-Could{background:var(--could-bg);color:var(--could)}.p-Wont{background:var(--wont-bg);color:var(--wont)}
 /* board */
@@ -117,6 +117,23 @@ details{background:var(--surface);border:1px solid var(--line);padding:8px 12px}
 summary{cursor:pointer;font-weight:500}
 details textarea{width:100%;min-height:140px;margin-top:8px;font-family:var(--font-mono);font-size:12px}
 .msg{font-size:12.5px;color:var(--muted)}
+/* delivery */
+.meters{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:16px}
+.meter{border:1px solid var(--line);padding:9px 11px;background:var(--bg)}
+.meter b{font:600 20px var(--font-display);font-variant-numeric:tabular-nums}
+.meter span{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.meter .track{height:6px;background:var(--surface2);margin-top:6px}.meter .track i{display:block;height:100%;background:var(--accent)}
+.pipe{display:grid;grid-template-columns:repeat(5,minmax(190px,1fr));gap:10px;min-width:1000px;margin-bottom:18px}
+.pipe .col h3{border-color:var(--accent)}
+.bd{font:500 11px var(--font-mono);padding:1px 6px;border-radius:2px}
+.bd.passing{background:var(--could-bg);color:var(--could)}.bd.failing{background:var(--must-bg);color:var(--must)}.bd.none{background:var(--wont-bg);color:var(--wont)}
+h4{font:600 14px var(--font-display);margin:4px 0 8px}
+.sbar{display:flex;height:8px;min-width:120px;background:var(--surface2)}.sbar i{display:block;height:100%}
+.io{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-top:8px}
+.io>div{display:flex;flex-direction:column;gap:8px;min-width:0}
+.io textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px}
+.io h4{margin:0}
+.chk{display:flex;gap:6px;align-items:center;font-size:12.5px}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 
@@ -159,6 +176,28 @@ details textarea{width:100%;min-height:140px;margin-top:8px;font-family:var(--fo
       <span class="msg" id="ioMsg" role="status"></span>
     </div>
   </details>
+
+  <details id="devops">
+    <summary>DevOps integration (Azure DevOps, Jira, GitHub)</summary>
+    <p class="msg">This page cannot call your tracker directly. Export a query from Azure DevOps or Jira as CSV (or JSON) and paste it to link work items, or export requirements in the format your tracker imports. Work items are matched to requirements by an ID such as REQ-03 in the title or tags.</p>
+    <div class="io">
+      <div>
+        <h4>Link work items from your tracker</h4>
+        <textarea id="src" aria-label="Tracker export" spellcheck="false" placeholder="ID,Title,State,Assigned To,Iteration Path,Tags,Story Points&#10;5120,REQ-05 Pay premiums,Active,J. Okafor,Portal\Sprint 16,REQ-05,8&#10;5121,Fix login redirect,New,,Portal\Sprint 16,,3"></textarea>
+        <label class="chk"><input type="checkbox" id="addNew" checked> Add unmatched work items as new requirements</label>
+        <div class="actions"><button class="btn primary" id="doImport">Link work items</button></div>
+        <span class="msg" id="impMsg" role="status">Recognised columns: ID or Key, Title or Summary, State or Status, Assigned To or Assignee, Iteration Path or Sprint, Tags or Labels, Story Points, Build, Environment, PR.</span>
+      </div>
+      <div>
+        <h4>Export for your tracker</h4>
+        <select id="expFmt" aria-label="Export format"><option value="ado">Azure DevOps (CSV)</option><option value="jira">Jira (CSV)</option><option value="gh">GitHub issues (Markdown checklist)</option></select>
+        <label class="chk"><input type="checkbox" id="expNew" checked> Only requirements without a work item</label>
+        <div class="actions"><button class="btn primary" id="doExport">Generate export</button><button class="btn" id="copyExport">Copy</button></div>
+        <textarea id="out" aria-label="Export output" spellcheck="false" readonly></textarea>
+        <span class="msg" id="expMsg" role="status"></span>
+      </div>
+    </div>
+  </details>
 </div>
 
 <script>
@@ -182,6 +221,18 @@ const SAMPLE=[
  {id:'REQ-13',title:'Reduce paper correspondence',description:'Move at least 60% of customers to digital-only documents in year one.',type:'Business',priority:'Should',status:'Approved',stakeholder:'Finance',goals:['Cut claim handling cost'],effort:2,depends:['REQ-02']},
  {id:'REQ-14',title:'Personalised renewal offers',description:'Offer pricing and cover tailored to claim and usage history.',type:'Business',priority:'Could',status:'Draft',stakeholder:'',goals:[],effort:8,depends:['REQ-02']}
 ];
+const ENVS=['Not started','Dev','Test','Staging','Production'];
+const BUILDS=['none','passing','failing'];
+const DELIV={
+ 'REQ-01':{status:'Verified',workItem:'AB#4101',sprint:'Sprint 14',assignee:'A. Patel',pr:'#212',build:'passing',env:'Production',testsPassed:42,testsTotal:42},
+ 'REQ-02':{status:'Built',workItem:'AB#4102',sprint:'Sprint 15',assignee:'J. Okafor',pr:'#230',build:'passing',env:'Staging',testsPassed:28,testsTotal:30},
+ 'REQ-03':{status:'Approved',workItem:'AB#4103',sprint:'Sprint 15',assignee:'M. Lind',pr:'#241',build:'failing',env:'Dev',testsPassed:12,testsTotal:19},
+ 'REQ-07':{status:'Approved',workItem:'AB#4107',sprint:'Sprint 15',assignee:'J. Okafor',pr:'#236',build:'passing',env:'Test',testsPassed:9,testsTotal:9},
+ 'REQ-08':{workItem:'AB#4108',sprint:'Sprint 16',assignee:'S. Rossi'},
+ 'REQ-09':{status:'Verified',workItem:'AB#4109',sprint:'Sprint 14',assignee:'S. Rossi',pr:'#218',build:'passing',env:'Production',testsPassed:17,testsTotal:17},
+ 'REQ-13':{workItem:'AB#4113',sprint:'Sprint 16',assignee:'A. Patel'}
+};
+SAMPLE.forEach(r=>Object.assign(r,DELIV[r.id]||{}));
 const S={reqs:[],tab:'board',sel:null,editing:null,q:'',ftype:'',fstatus:''};
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -189,7 +240,7 @@ const KEY='req-visualiser-v1';
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S.reqs))}catch(e){}}
 function init(){
   let d=null;try{d=JSON.parse(localStorage.getItem(KEY))}catch(e){}
-  S.reqs=Array.isArray(d)&&d.length?d.map(norm):JSON.parse(JSON.stringify(SAMPLE));
+  S.reqs=Array.isArray(d)&&d.length?d.map(norm):SAMPLE.map(norm);
 }
 function norm(r,i){
   const list=v=>Array.isArray(v)?v.map(x=>String(x).trim()).filter(Boolean):String(v||'').split(',').map(x=>x.trim()).filter(Boolean);
@@ -197,7 +248,10 @@ function norm(r,i){
   return {id:String(r.id||'REQ-'+String(i+1).padStart(2,'0')),title:String(r.title||'Untitled requirement'),description:String(r.description||''),
     type:TYPES.includes(r.type)?r.type:'Functional',priority:PRI.find(p=>p.toLowerCase()===pri.toLowerCase())||'Should',
     status:STATUS.includes(r.status)?r.status:'Draft',stakeholder:String(r.stakeholder||''),goals:list(r.goals),
-    effort:Math.max(0,Number(r.effort)||0),depends:list(r.depends)};
+    effort:Math.max(0,Number(r.effort)||0),depends:list(r.depends),
+    workItem:String(r.workItem||''),pr:String(r.pr||''),sprint:String(r.sprint||''),assignee:String(r.assignee||''),
+    env:ENVS.includes(r.env)?r.env:'Not started',build:BUILDS.includes(r.build)?r.build:'none',
+    testsPassed:Math.max(0,Number(r.testsPassed)||0),testsTotal:Math.max(0,Number(r.testsTotal)||0)};
 }
 const byId=()=>Object.fromEntries(S.reqs.map(r=>[r.id,r]));
 const visible=()=>{const q=S.q.toLowerCase();return S.reqs.filter(r=>(!S.ftype||r.type===S.ftype)&&(!S.fstatus||r.status===S.fstatus)&&
@@ -213,6 +267,14 @@ function cycles(){
 function flags(){
   const f=[],m=byId(),rank={Must:0,Should:1,Could:2,Wont:3};
   S.reqs.forEach(r=>{
+    if(r.priority!=='Wont'){
+      if(['Approved','Built','Verified'].includes(r.status)&&!r.workItem)f.push({id:r.id,sev:'warn',t:r.status+' but no work item in the tracker'});
+      if(r.build==='failing')f.push({id:r.id,sev:'bad',t:'Build is failing'});
+      if(['Built','Verified'].includes(r.status)&&!r.testsTotal)f.push({id:r.id,sev:'warn',t:r.status+' with no tests recorded'});
+      if(r.testsTotal&&r.testsPassed<r.testsTotal)f.push({id:r.id,sev:'warn',t:`${r.testsPassed}/${r.testsTotal} tests passing`});
+      if(r.env==='Production'&&!['Built','Verified'].includes(r.status))f.push({id:r.id,sev:'warn',t:`In production but status is ${r.status}`});
+      r.depends.forEach(d=>{const x=m[d];if(x&&ENVS.indexOf(r.env)>ENVS.indexOf(x.env))f.push({id:r.id,sev:'bad',t:`Deployed to ${r.env} ahead of dependency ${d} (${x.env})`})});
+    }
     if(!r.goals.length)f.push({id:r.id,sev:'warn',t:'No business goal linked'});
     if(!r.stakeholder)f.push({id:r.id,sev:'warn',t:'No stakeholder named'});
     if(r.priority==='Must'&&r.status==='Draft')f.push({id:r.id,sev:'warn',t:'Must have still in Draft'});
@@ -231,12 +293,13 @@ function renderChrome(){
   const eff=Object.fromEntries(PRI.map(p=>[p,S.reqs.filter(r=>r.priority===p).reduce((a,r)=>a+r.effort,0)]));
   const goals=new Set(S.reqs.flatMap(r=>r.goals));
   $('stats').innerHTML=[[S.reqs.length,'Requirements'],[goals.size,'Goals'],[S.reqs.reduce((a,r)=>a+r.effort,0),'Effort points'],
-    [Math.round(100*eff.Must/tot)+'%','Effort in Must']].map(([v,l])=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
+    [Math.round(100*eff.Must/tot)+'%','Effort in Must'],
+    [S.reqs.filter(r=>r.priority==='Must'&&r.env==='Production').length+'/'+S.reqs.filter(r=>r.priority==='Must').length,'Musts live']].map(([v,l])=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
   $('bar').innerHTML=PRI.map(p=>`<i style="width:${100*eff[p]/tot}%;background:var(--${p.toLowerCase()})" title="${PLABEL[p]}: ${eff[p]} pts"></i>`).join('');
   $('legend').innerHTML=PRI.map(p=>`<span><span class="dot" style="background:var(--${p.toLowerCase()})"></span>${PLABEL[p]} ${eff[p]} pts</span>`).join('');
   const fl=flags();
   $('flags').innerHTML=fl.length?fl.slice(0,12).map((x,i)=>`<button class="flag ${x.sev}" data-id="${esc(x.id)}"><small>${esc(x.id)}</small>${esc(x.t)}</button>`).join('')+(fl.length>12?`<span class="msg" style="align-self:center">+${fl.length-12} more</span>`:''):'<span class="msg">No gaps or conflicts found.</span>';
-  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['table','Table']]
+  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['delivery','Delivery'],['table','Table']]
     .map(([k,l])=>`<button class="tab" role="tab" data-tab="${k}" aria-selected="${S.tab===k}">${l}</button>`).join('');
   $('ftype').innerHTML='<option value="">All types</option>'+TYPES.map(t=>`<option ${S.ftype===t?'selected':''}>${t}</option>`).join('');
   $('fstatus').innerHTML='<option value="">All statuses</option>'+STATUS.map(t=>`<option ${S.fstatus===t?'selected':''}>${t}</option>`).join('');
@@ -298,9 +361,30 @@ function graphView(rs){
   return `<p class="hint">Arrows run from what must exist first to what needs it. Select a requirement to trace everything upstream and downstream of it.</p>
   <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="Requirement dependency map">${heads}${edges}${nodes}</svg>`;
 }
+function deliveryView(rs){
+  const live=rs.filter(r=>r.priority!=='Wont');
+  const pct=(n,d)=>d?Math.round(100*n/d):0;
+  const mv=(label,n,d)=>`<div class="meter"><span>${label}</span><b>${pct(n,d)}%</b> <span style="display:inline;text-transform:none;letter-spacing:0">${n} of ${d}</span><div class="track"><i style="width:${pct(n,d)}%"></i></div></div>`;
+  const musts=live.filter(r=>r.priority==='Must');
+  const meters=`<div class="meters">${mv('Linked to a work item',live.filter(r=>r.workItem).length,live.length)}${mv('With tests recorded',live.filter(r=>r.testsTotal).length,live.length)}
+   ${mv('Tests passing',live.reduce((a,r)=>a+r.testsPassed,0),live.reduce((a,r)=>a+r.testsTotal,0))}${mv('Builds passing',live.filter(r=>r.build==='passing').length,live.filter(r=>r.build!=='none').length)}
+   ${mv('Musts in production',musts.filter(r=>r.env==='Production').length,musts.length)}</div>`;
+  const pipe=`<h4>Release pipeline</h4><div class="pipe">${ENVS.map(e=>{const items=live.filter(r=>r.env===e);
+    return `<div class="col"><h3>${e}<span>${items.length}</span></h3><div class="cards">${items.map(r=>`<button class="card ${S.sel===r.id?'sel':''}" data-open="${esc(r.id)}">
+     <span class="mono">${esc(r.id)} ${r.workItem?'· '+esc(r.workItem):''}</span><span class="t">${esc(r.title)}</span>
+     <span class="meta"><span class="bd ${r.build}">build ${r.build}</span>${r.testsTotal?`<span>${r.testsPassed}/${r.testsTotal} tests</span>`:''}${r.pr?`<span>PR ${esc(r.pr)}</span>`:''}</span>${pill(r.priority)}</button>`).join('')||'<div class="empty">Empty</div>'}</div></div>`}).join('')}</div>`;
+  const sp={};live.forEach(r=>{const k=r.sprint||'Unplanned';(sp[k]??=[]).push(r)});
+  const keys=Object.keys(sp).sort((a,b)=>a==='Unplanned'?1:b==='Unplanned'?-1:a.localeCompare(b,undefined,{numeric:true}));
+  const maxPts=Math.max(1,...keys.map(k=>sp[k].reduce((a,r)=>a+r.effort,0)));
+  const sprints=`<h4>Sprint plan</h4><table><thead><tr><th>Sprint</th><th class="num">Items</th><th class="num">Points</th><th>Points by priority</th><th>Assignees</th><th>Live</th></tr></thead><tbody>${keys.map(k=>{
+    const l=sp[k],pts=l.reduce((a,r)=>a+r.effort,0);
+    return `<tr style="cursor:default"><td>${esc(k)}</td><td class="num">${l.length}</td><td class="num">${pts}</td><td><div class="sbar" style="width:${Math.max(12,100*pts/maxPts)}%">${PRI.map(p=>`<i style="width:${100*l.filter(r=>r.priority===p).reduce((a,r)=>a+r.effort,0)/(pts||1)}%;background:var(--${p.toLowerCase()})"></i>`).join('')}</div></td>
+    <td>${esc([...new Set(l.map(r=>r.assignee).filter(Boolean))].join(', '))||'<span class="msg">Unassigned</span>'}</td><td>${l.filter(r=>r.env==='Production').length}/${l.length}</td></tr>`}).join('')}</tbody></table>`;
+  return live.length?meters+pipe+sprints:'<div class="empty">No requirements match the filters.</div>';
+}
 function renderView(){
   const rs=visible();
-  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView})[S.tab](rs);
+  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView})[S.tab](rs);
 }
 
 /* editor */
@@ -321,6 +405,14 @@ function renderEditor(){
    <label><span>Stakeholder</span><input type="text" id="f-stake" value="${esc(r.stakeholder)}"></label>
    <label><span>Business goals (comma separated)</span><input type="text" id="f-goals" value="${esc(r.goals.join(', '))}" list="goalList"></label>
    <datalist id="goalList">${[...new Set(S.reqs.flatMap(x=>x.goals))].map(g=>`<option value="${esc(g)}">`).join('')}</datalist>
+   <div class="row2"><label><span>Work item (e.g. AB#4101, PROJ-12)</span><input type="text" id="f-wi" value="${esc(r.workItem)}"></label>
+   <label><span>Pull request</span><input type="text" id="f-pr" value="${esc(r.pr)}"></label></div>
+   <div class="row2"><label><span>Sprint</span><input type="text" id="f-sprint" value="${esc(r.sprint)}"></label>
+   <label><span>Assignee</span><input type="text" id="f-assignee" value="${esc(r.assignee)}"></label></div>
+   <div class="row2"><label><span>Deployed to</span><select id="f-env">${opt(ENVS,r.env)}</select></label>
+   <label><span>Build</span><select id="f-build">${opt(BUILDS,r.build)}</select></label></div>
+   <div class="row2"><label><span>Tests passing</span><input type="number" id="f-tp" min="0" value="${r.testsPassed}"></label>
+   <label><span>Tests total</span><input type="number" id="f-tt" min="0" value="${r.testsTotal}"></label></div>
    <div><span class="msg">Depends on</span><div class="deps">${S.reqs.filter(x=>x.id!==r.id).map(x=>`<label><input type="checkbox" class="f-dep" value="${esc(x.id)}" ${r.depends.includes(x.id)?'checked':''}><span class="mono">${esc(x.id)}</span> ${esc(x.title)}</label>`).join('')||'<span class="msg">No other requirements yet.</span>'}</div></div>
    <div class="actions"><button class="btn primary" type="submit">${isNew?'Add requirement':'Save changes'}</button>${isNew?'':'<button type="button" class="btn danger" id="del">Delete</button>'}</div>
    <span class="msg" id="delMsg" role="status"></span></form>`;
@@ -331,7 +423,7 @@ function openEditor(id){
 }
 function newReq(){
   let n=S.reqs.length+1;while(S.reqs.some(r=>r.id==='REQ-'+String(n).padStart(2,'0')))n++;
-  S.editing={isNew:true,orig:null,draft:{id:'REQ-'+String(n).padStart(2,'0'),title:'',description:'',type:'Functional',priority:'Should',status:'Draft',stakeholder:'',goals:[],effort:3,depends:[]}};
+  S.editing={isNew:true,orig:null,draft:{id:'REQ-'+String(n).padStart(2,'0'),title:'',description:'',type:'Functional',priority:'Should',status:'Draft',stakeholder:'',goals:[],effort:3,depends:[],workItem:'',pr:'',sprint:'',assignee:'',env:'Not started',build:'none',testsPassed:0,testsTotal:0}};
   renderAll();$('f-title')?.focus();
 }
 function commit(){
@@ -340,15 +432,77 @@ function commit(){
   d.priority=$('f-pri').value;d.type=$('f-type').value;d.status=$('f-status').value;d.effort=Math.max(0,Number($('f-effort').value)||0);
   d.stakeholder=$('f-stake').value.trim();d.goals=$('f-goals').value.split(',').map(s=>s.trim()).filter(Boolean);
   d.depends=[...document.querySelectorAll('.f-dep:checked')].map(c=>c.value);
+  d.workItem=$('f-wi').value.trim();d.pr=$('f-pr').value.trim();d.sprint=$('f-sprint').value.trim();d.assignee=$('f-assignee').value.trim();
+  d.env=$('f-env').value;d.build=$('f-build').value;d.testsPassed=Math.max(0,Number($('f-tp').value)||0);d.testsTotal=Math.max(0,Number($('f-tt').value)||0);
   if(S.editing.isNew)S.reqs.push(d);else S.reqs[S.reqs.findIndex(r=>r.id===S.editing.orig)]=d;
   S.sel=d.id;S.editing=null;save();renderAll();
 }
 function renderAll(){renderChrome();renderView();renderEditor()}
 
+/* devops import / export */
+function parseCSV(t){
+  const rows=[];let row=[],f='',q=false;
+  for(let i=0;i<t.length;i++){const c=t[i];
+    if(q){if(c==='"'){if(t[i+1]==='"'){f+='"';i++}else q=false}else f+=c}
+    else if(c==='"')q=true;else if(c===','){row.push(f);f=''}
+    else if(c==='\n'||c==='\r'){if(c==='\r'&&t[i+1]==='\n')i++;row.push(f);f='';if(row.some(x=>x.trim()))rows.push(row);row=[]}
+    else f+=c}
+  row.push(f);if(row.some(x=>x.trim()))rows.push(row);
+  if(rows.length<2)return [];
+  const h=rows[0].map(x=>x.trim());return rows.slice(1).map(r=>Object.fromEntries(h.map((k,i)=>[k,(r[i]||'').trim()])));
+}
+const mapState=s=>{s=String(s||'').toLowerCase();
+  if(/closed|done|complete|verified|resolved/.test(s))return 'Verified';if(/review|test|ready/.test(s))return 'Built';
+  if(/active|progress|commit|approved|doing/.test(s))return 'Approved';if(/new|to ?do|open|backlog|propos/.test(s))return 'Draft';return null};
+function importWork(){
+  const msg=$('impMsg'),txt=$('src').value.trim();let rows;
+  try{rows=/^[\[{]/.test(txt)?[].concat(JSON.parse(txt)):parseCSV(txt)}catch(_){rows=[]}
+  if(!rows.length){msg.textContent='No rows found. Paste a CSV with a header row, or a JSON list.';return}
+  const norm_=k=>k.toLowerCase().replace(/[^a-z0-9]/g,'');
+  const pick=(o,...names)=>{const m={};Object.keys(o).forEach(k=>m[norm_(k)]=o[k]);for(const n of names)if(m[n]!=null&&String(m[n]).trim()!=='')return String(m[n]).trim();return ''};
+  const prefix=(S.reqs.find(r=>/^[A-Za-z]+-/.test(r.id))?.id.match(/^[A-Za-z]+-/)||['REQ-'])[0];
+  let linked=0,added=0,skipped=0;
+  rows.forEach(o=>{
+    const key=pick(o,'id','workitemid','key','issuekey','number'),title=pick(o,'title','summary'),tags=pick(o,'tags','labels'),
+      st=mapState(pick(o,'state','status')),who=pick(o,'assignedto','assignee'),sp=pick(o,'iterationpath','sprint').split(/[\\\/]/).pop(),
+      pts=pick(o,'storypoints','effort','points','storypointestimate'),bld=pick(o,'build').toLowerCase(),env=pick(o,'environment','env'),pr=pick(o,'pr','pullrequest');
+    const m=(title+' '+tags+' '+pick(o,'requirementid','requirement')).match(/REQ-\d+/i);
+    let r=m&&S.reqs.find(x=>x.id.toUpperCase()===m[0].toUpperCase());
+    if(!r){if(!$('addNew').checked||!title){skipped++;return}
+      r=norm({title:title.replace(/^REQ-\d+[\s:\-]*/i,''),priority:'Should',status:st||'Draft',effort:pts},S.reqs.length);
+      let n=S.reqs.length+1;while(S.reqs.some(x=>x.id===prefix+String(n).padStart(2,'0')))n++;r.id=prefix+String(n).padStart(2,'0');S.reqs.push(r);added++}
+    else linked++;
+    if(key)r.workItem=/^\d+$/.test(key)?'AB#'+key:key;if(who)r.assignee=who;if(sp)r.sprint=sp;if(pts)r.effort=Number(pts)||r.effort;
+    if(st&&!(r.status==='Verified'&&st!=='Verified'))r.status=st;
+    if(BUILDS.includes(bld))r.build=bld;const e=ENVS.find(x=>x.toLowerCase()===env.toLowerCase());if(e)r.env=e;if(pr)r.pr=pr;
+  });
+  save();renderAll();msg.textContent=`Linked ${linked}, added ${added}, skipped ${skipped}.`;
+}
+const csvq=s=>/[",\n]/.test(s)?'"'+String(s).replace(/"/g,'""')+'"':String(s);
+function exportWork(){
+  let l=S.reqs.filter(r=>!($('expNew').checked&&r.workItem));
+  const pn={Must:1,Should:2,Could:3,Wont:4},fmt=$('expFmt').value;let out='';
+  if(fmt==='ado'){
+    const wt={Business:'Feature',Functional:'User Story','Non-functional':'User Story',Constraint:'User Story'};
+    out='Work Item Type,Title,Description,Priority,Story Points,Iteration Path,Tags\n'+l.map(r=>[wt[r.type],r.id+' '+r.title,r.description,pn[r.priority],r.effort||'',r.sprint,[r.id,r.priority==='Wont'?'WontHave':r.priority+'Have',...r.goals].join('; ')].map(csvq).join(',')).join('\n');
+  }else if(fmt==='jira'){
+    const pr={Must:'Highest',Should:'High',Could:'Medium',Wont:'Lowest'},it={Business:'Epic',Functional:'Story','Non-functional':'Story',Constraint:'Task'};
+    out='Summary,Issue Type,Priority,Description,Labels,Sprint,Story point estimate\n'+l.map(r=>[r.id+' '+r.title,it[r.type],pr[r.priority],r.description,[r.id,r.priority,...r.goals.map(g=>g.replace(/\s+/g,'-'))].join(' '),r.sprint,r.effort||''].map(csvq).join(',')).join('\n');
+  }else{
+    out=PRI.map(p=>{const g=l.filter(r=>r.priority===p);return g.length?`### ${PLABEL[p]}\n`+g.map(r=>`- [${r.status==='Verified'?'x':' '}] ${r.id} ${r.title} (${r.effort} pts${r.goals.length?', goals: '+r.goals.join(' / '):''})${r.pr?' '+r.pr:''}`).join('\n'):''}).filter(Boolean).join('\n\n');
+  }
+  $('out').value=out;$('expMsg').textContent=l.length?`${l.length} requirements exported.`:'Nothing to export. Untick the filter to include requirements that already have a work item.';
+}
+
 /* events */
 document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset');if(!t)return;
-  if(t.dataset.tab){S.tab=t.dataset.tab;renderAll()}
+  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#doImport,#doExport,#copyExport');if(!t)return;
+  if(t.id==='doImport')importWork();
+  else if(t.id==='doExport')exportWork();
+  else if(t.id==='copyExport'){const o=$('out');if(!o.value){$('expMsg').textContent='Generate an export first.';return}
+    const fb=()=>{o.select();$('expMsg').textContent='Select and copy the text above.'};
+    navigator.clipboard?.writeText(o.value).then(()=>$('expMsg').textContent='Copied to clipboard.',fb)||fb()}
+  else if(t.dataset.tab){S.tab=t.dataset.tab;renderAll()}
   else if(t.dataset.open)openEditor(t.dataset.open);
   else if(t.dataset.id)openEditor(t.dataset.id);
   else if(t.id==='add')newReq();
@@ -361,7 +515,7 @@ document.addEventListener('click',e=>{
     (navigator.clipboard?.writeText(v).then(done,()=>{$('json').select();$('ioMsg').textContent='Select and copy the text above.'}))||($('json').select(),$('ioMsg').textContent='Select and copy the text above.')}
   else if(t.id==='load'){try{const d=JSON.parse($('json').value);if(!Array.isArray(d)||!d.length)throw 0;
     S.reqs=d.map(norm);S.editing=null;S.sel=null;save();renderAll();$('ioMsg').textContent=`Loaded ${S.reqs.length} requirements.`}catch(_){$('ioMsg').textContent='That is not a JSON list of requirements. Check the brackets and commas.'}}
-  else if(t.id==='reset'){S.reqs=JSON.parse(JSON.stringify(SAMPLE));S.editing=null;S.sel=null;save();renderAll();$('ioMsg').textContent='Sample restored.'}
+  else if(t.id==='reset'){S.reqs=SAMPLE.map(norm);S.editing=null;S.sel=null;save();renderAll();$('ioMsg').textContent='Sample restored.'}
 });
 document.addEventListener('submit',e=>{if(e.target.id==='form'){e.preventDefault();commit()}});
 $('q').addEventListener('input',e=>{S.q=e.target.value;renderView()});
