@@ -134,6 +134,10 @@ h4{font:600 14px var(--font-display);margin:4px 0 8px}
 .io textarea{width:100%;min-height:150px;font-family:var(--font-mono);font-size:12px}
 .io h4{margin:0}
 .chk{display:flex;gap:6px;align-items:center;font-size:12.5px}
+.bd.blocked{background:var(--should-bg);color:var(--should)}
+.tc-row{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;padding:6px 0;border-bottom:1px solid var(--line)}
+.tc-row .tc-title{grid-column:1/-1}
+.tcs td.c,.tcs th.c{text-align:center}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 
@@ -233,6 +237,16 @@ const DELIV={
  'REQ-13':{workItem:'AB#4113',sprint:'Sprint 16',assignee:'A. Patel'}
 };
 SAMPLE.forEach(r=>Object.assign(r,DELIV[r.id]||{}));
+const T=(title,type,status)=>({title,type,status});
+const TESTS={
+ 'REQ-01':[T('Sign in with valid email and password','Integration','Passed'),T('MFA code is required on a new device','Integration','Passed'),T('Locked after five failed attempts','Unit','Passed'),T('Password reset email is sent','Integration','Passed'),T('Session ends after 20 minutes idle','Unit','Passed')],
+ 'REQ-02':[T('Active policies are listed','Integration','Passed'),T('Schedule downloads as PDF','Integration','Passed'),T('Expired policies are hidden','Unit','Passed'),T('Customer sees only their own policies','Security','Failed')],
+ 'REQ-03':[T('Create claim with photos','Integration','Passed'),T('Claim reference is returned','Unit','Passed'),T('Upload rejects files over 10 MB','Unit','Failed'),T('Claims API timeout shows a retry message','Integration','Blocked'),T('Claimant completes journey unaided','UAT','Not run')],
+ 'REQ-07':[T('Card token is stored, not the card number','Security','Passed'),T('Declined card shows a clear message','Integration','Passed'),T('Provider outage falls back gracefully','Integration','Passed')],
+ 'REQ-08':[T('95th percentile page load under 2 s','Performance','Not run'),T('Home page load under 1 s on cable','Performance','Not run')],
+ 'REQ-09':[T('Screen reader completes sign-in','Accessibility','Passed'),T('All pages pass automated audit','Accessibility','Passed'),T('Keyboard-only claim journey','Accessibility','Passed')]
+};
+SAMPLE.forEach(r=>{if(TESTS[r.id])r.tests=TESTS[r.id]});
 const S={reqs:[],tab:'board',sel:null,editing:null,q:'',ftype:'',fstatus:''};
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -242,7 +256,15 @@ function init(){
   let d=null;try{d=JSON.parse(localStorage.getItem(KEY))}catch(e){}
   S.reqs=Array.isArray(d)&&d.length?d.map(norm):SAMPLE.map(norm);
 }
+const TTYPES=['Unit','Integration','UAT','Performance','Accessibility','Security'];
+const TSTAT=['Not run','Passed','Failed','Blocked'];
+function sync(r){if(r.tests.length){r.testsTotal=r.tests.length;r.testsPassed=r.tests.filter(t=>t.status==='Passed').length}return r}
 function norm(r,i){
+  const o=norm0(r,i);
+  o.tests=(Array.isArray(r.tests)?r.tests:[]).map(t=>({title:String(t.title||'').trim(),type:TTYPES.includes(t.type)?t.type:'Unit',status:TSTAT.includes(t.status)?t.status:'Not run'}));
+  return sync(o);
+}
+function norm0(r,i){
   const list=v=>Array.isArray(v)?v.map(x=>String(x).trim()).filter(Boolean):String(v||'').split(',').map(x=>x.trim()).filter(Boolean);
   const pri=String(r.priority||'Should').replace(/[^A-Za-z]/g,'');
   return {id:String(r.id||'REQ-'+String(i+1).padStart(2,'0')),title:String(r.title||'Untitled requirement'),description:String(r.description||''),
@@ -269,6 +291,7 @@ function flags(){
   S.reqs.forEach(r=>{
     if(r.priority!=='Wont'){
       if(['Approved','Built','Verified'].includes(r.status)&&!r.workItem)f.push({id:r.id,sev:'warn',t:r.status+' but no work item in the tracker'});
+      if(r.priority==='Must'&&!r.tests.length&&!r.testsTotal)f.push({id:r.id,sev:'warn',t:'Must have with no test cases'});
       if(r.build==='failing')f.push({id:r.id,sev:'bad',t:'Build is failing'});
       if(['Built','Verified'].includes(r.status)&&!r.testsTotal)f.push({id:r.id,sev:'warn',t:r.status+' with no tests recorded'});
       if(r.testsTotal&&r.testsPassed<r.testsTotal)f.push({id:r.id,sev:'warn',t:`${r.testsPassed}/${r.testsTotal} tests passing`});
@@ -299,7 +322,7 @@ function renderChrome(){
   $('legend').innerHTML=PRI.map(p=>`<span><span class="dot" style="background:var(--${p.toLowerCase()})"></span>${PLABEL[p]} ${eff[p]} pts</span>`).join('');
   const fl=flags();
   $('flags').innerHTML=fl.length?fl.slice(0,12).map((x,i)=>`<button class="flag ${x.sev}" data-id="${esc(x.id)}"><small>${esc(x.id)}</small>${esc(x.t)}</button>`).join('')+(fl.length>12?`<span class="msg" style="align-self:center">+${fl.length-12} more</span>`:''):'<span class="msg">No gaps or conflicts found.</span>';
-  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['delivery','Delivery'],['table','Table']]
+  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['tests','Tests'],['delivery','Delivery'],['table','Table']]
     .map(([k,l])=>`<button class="tab" role="tab" data-tab="${k}" aria-selected="${S.tab===k}">${l}</button>`).join('');
   $('ftype').innerHTML='<option value="">All types</option>'+TYPES.map(t=>`<option ${S.ftype===t?'selected':''}>${t}</option>`).join('');
   $('fstatus').innerHTML='<option value="">All statuses</option>'+STATUS.map(t=>`<option ${S.fstatus===t?'selected':''}>${t}</option>`).join('');
@@ -382,9 +405,35 @@ function deliveryView(rs){
     <td>${esc([...new Set(l.map(r=>r.assignee).filter(Boolean))].join(', '))||'<span class="msg">Unassigned</span>'}</td><td>${l.filter(r=>r.env==='Production').length}/${l.length}</td></tr>`}).join('')}</tbody></table>`;
   return live.length?meters+pipe+sprints:'<div class="empty">No requirements match the filters.</div>';
 }
+function testsView(rs){
+  const live=rs.filter(r=>r.priority!=='Wont');
+  if(!live.length)return '<div class="empty">No requirements match the filters.</div>';
+  const all=live.flatMap(r=>r.tests.map(t=>({r,t})));
+  const n=s=>all.filter(x=>x.t.status===s).length;
+  const ran=all.length-n('Not run'),pct=(a,b)=>b?Math.round(100*a/b):0;
+  const mt=(l,v,sub,w)=>`<div class="meter"><span>${l}</span><b>${v}</b> <span style="display:inline;text-transform:none;letter-spacing:0">${sub}</span>${w!=null?`<div class="track"><i style="width:${w}%"></i></div>`:''}</div>`;
+  const musts=live.filter(r=>r.priority==='Must');
+  const meters=`<div class="meters">${mt('Requirements with tests',pct(live.filter(r=>r.tests.length).length,live.length)+'%',`${live.filter(r=>r.tests.length).length} of ${live.length}`,pct(live.filter(r=>r.tests.length).length,live.length))}
+   ${mt('Musts with tests',pct(musts.filter(r=>r.tests.length).length,musts.length)+'%',`${musts.filter(r=>r.tests.length).length} of ${musts.length}`,pct(musts.filter(r=>r.tests.length).length,musts.length))}
+   ${mt('Pass rate of tests run',pct(n('Passed'),ran)+'%',`${n('Passed')} of ${ran}`,pct(n('Passed'),ran))}
+   ${mt('Failed or blocked',n('Failed')+n('Blocked'),`${n('Failed')} failed, ${n('Blocked')} blocked`)}
+   ${mt('Not run yet',n('Not run'),`of ${all.length} test cases`)}</div>`;
+  const rows=[...live].sort((a,b)=>PRI.indexOf(a.priority)-PRI.indexOf(b.priority)||a.id.localeCompare(b.id));
+  const cell=(r,ty)=>{const l=r.tests.filter(t=>t.type===ty);if(!l.length)return '<td class="c"></td>';
+    const c=l.some(t=>t.status==='Failed')?'failing':l.some(t=>t.status==='Blocked')?'blocked':l.every(t=>t.status==='Passed')?'passing':'none';
+    return `<td class="c"><span class="bd ${c}" title="${l.map(t=>t.status).join(', ')}">${l.length}</span></td>`};
+  const cov=`<h4>Coverage by requirement</h4><p class="hint">Each badge counts test cases of that type. Red means one has failed, amber means one is blocked, green means all passed, grey means some have not run.</p>
+   <table class="tcs"><thead><tr><th>Requirement</th><th>Pri.</th>${TTYPES.map(t=>`<th class="c">${t}</th>`).join('')}<th>Passed</th></tr></thead><tbody>${rows.map(r=>{
+    const p=r.tests.filter(t=>t.status==='Passed').length;
+    return `<tr class="${S.sel===r.id?'sel':''}" data-open="${esc(r.id)}"><td><span class="mono">${esc(r.id)}</span> ${esc(r.title)}</td><td>${pill(r.priority)}</td>${TTYPES.map(t=>cell(r,t)).join('')}
+    <td>${r.tests.length?`${p}/${r.tests.length}`:`<span style="color:${r.priority==='Must'?'var(--bad)':'var(--muted)'}">No tests</span>`}</td></tr>`}).join('')}</tbody></table>`;
+  const bad=all.filter(x=>x.t.status==='Failed'||x.t.status==='Blocked');
+  const list=`<h4 style="margin-top:18px">Failed and blocked tests</h4>${bad.length?`<table><tbody>${bad.map(x=>`<tr data-open="${esc(x.r.id)}"><td class="mono">${esc(x.r.id)}</td><td>${esc(x.t.title)||'Untitled test'}</td><td>${esc(x.t.type)}</td><td><span class="bd ${x.t.status==='Failed'?'failing':'blocked'}">${x.t.status}</span></td></tr>`).join('')}</tbody></table>`:'<p class="msg">Nothing failing or blocked.</p>'}`;
+  return meters+cov+list;
+}
 function renderView(){
   const rs=visible();
-  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView})[S.tab](rs);
+  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView,tests:testsView})[S.tab](rs);
 }
 
 /* editor */
@@ -413,6 +462,11 @@ function renderEditor(){
    <label><span>Build</span><select id="f-build">${opt(BUILDS,r.build)}</select></label></div>
    <div class="row2"><label><span>Tests passing</span><input type="number" id="f-tp" min="0" value="${r.testsPassed}"></label>
    <label><span>Tests total</span><input type="number" id="f-tt" min="0" value="${r.testsTotal}"></label></div>
+   <div><span class="msg">Test cases${r.tests.length?` (${r.tests.filter(t=>t.status==='Passed').length} of ${r.tests.length} passing; the counts above follow this list)`:''}</span>
+   <div id="tcs">${r.tests.map((t,i)=>`<div class="tc-row"><input type="text" class="tc-title" value="${esc(t.title)}" placeholder="What should be verified?" aria-label="Test case ${i+1} title">
+    <select class="tc-type" aria-label="Test type">${opt(TTYPES,t.type)}</select><select class="tc-status" aria-label="Test status">${opt(TSTAT,t.status)}</select>
+    <button type="button" class="btn" data-rmtest="${i}" aria-label="Remove test case ${i+1}">×</button></div>`).join('')}</div>
+   <button type="button" class="btn" data-addtest="1" style="margin-top:6px">+ Add test case</button></div>
    <div><span class="msg">Depends on</span><div class="deps">${S.reqs.filter(x=>x.id!==r.id).map(x=>`<label><input type="checkbox" class="f-dep" value="${esc(x.id)}" ${r.depends.includes(x.id)?'checked':''}><span class="mono">${esc(x.id)}</span> ${esc(x.title)}</label>`).join('')||'<span class="msg">No other requirements yet.</span>'}</div></div>
    <div class="actions"><button class="btn primary" type="submit">${isNew?'Add requirement':'Save changes'}</button>${isNew?'':'<button type="button" class="btn danger" id="del">Delete</button>'}</div>
    <span class="msg" id="delMsg" role="status"></span></form>`;
@@ -423,10 +477,10 @@ function openEditor(id){
 }
 function newReq(){
   let n=S.reqs.length+1;while(S.reqs.some(r=>r.id==='REQ-'+String(n).padStart(2,'0')))n++;
-  S.editing={isNew:true,orig:null,draft:{id:'REQ-'+String(n).padStart(2,'0'),title:'',description:'',type:'Functional',priority:'Should',status:'Draft',stakeholder:'',goals:[],effort:3,depends:[],workItem:'',pr:'',sprint:'',assignee:'',env:'Not started',build:'none',testsPassed:0,testsTotal:0}};
+  S.editing={isNew:true,orig:null,draft:{id:'REQ-'+String(n).padStart(2,'0'),title:'',description:'',type:'Functional',priority:'Should',status:'Draft',stakeholder:'',goals:[],effort:3,depends:[],tests:[],workItem:'',pr:'',sprint:'',assignee:'',env:'Not started',build:'none',testsPassed:0,testsTotal:0}};
   renderAll();$('f-title')?.focus();
 }
-function commit(){
+function readDraft(){
   const d=S.editing.draft;
   d.title=$('f-title').value.trim()||'Untitled requirement';d.description=$('f-desc').value.trim();
   d.priority=$('f-pri').value;d.type=$('f-type').value;d.status=$('f-status').value;d.effort=Math.max(0,Number($('f-effort').value)||0);
@@ -434,6 +488,11 @@ function commit(){
   d.depends=[...document.querySelectorAll('.f-dep:checked')].map(c=>c.value);
   d.workItem=$('f-wi').value.trim();d.pr=$('f-pr').value.trim();d.sprint=$('f-sprint').value.trim();d.assignee=$('f-assignee').value.trim();
   d.env=$('f-env').value;d.build=$('f-build').value;d.testsPassed=Math.max(0,Number($('f-tp').value)||0);d.testsTotal=Math.max(0,Number($('f-tt').value)||0);
+  d.tests=[...document.querySelectorAll('.tc-row')].map(row=>({title:row.querySelector('.tc-title').value.trim(),type:row.querySelector('.tc-type').value,status:row.querySelector('.tc-status').value}));
+  sync(d);
+}
+function commit(){
+  readDraft();const d=S.editing.draft;d.tests=d.tests.filter(t=>t.title);sync(d);
   if(S.editing.isNew)S.reqs.push(d);else S.reqs[S.reqs.findIndex(r=>r.id===S.editing.orig)]=d;
   S.sel=d.id;S.editing=null;save();renderAll();
 }
@@ -491,13 +550,21 @@ function exportWork(){
   }else{
     out=PRI.map(p=>{const g=l.filter(r=>r.priority===p);return g.length?`### ${PLABEL[p]}\n`+g.map(r=>`- [${r.status==='Verified'?'x':' '}] ${r.id} ${r.title} (${r.effort} pts${r.goals.length?', goals: '+r.goals.join(' / '):''})${r.pr?' '+r.pr:''}`).join('\n'):''}).filter(Boolean).join('\n\n');
   }
+  const tl=l.flatMap(r=>r.tests.filter(t=>t.title).map(t=>({r,t})));
+  if(tl.length){
+    if(fmt==='ado')out+='\n'+tl.map(({r,t})=>['Test Case',r.id+' '+t.title,'',pn[r.priority],'',r.sprint,[r.id,t.type,'Test'].join('; ')].map(csvq).join(',')).join('\n');
+    else if(fmt==='jira')out+='\n'+tl.map(({r,t})=>[r.id+' '+t.title,'Test',{Must:'Highest',Should:'High',Could:'Medium',Wont:'Lowest'}[r.priority],'',[r.id,t.type].join(' '),r.sprint,''].map(csvq).join(',')).join('\n');
+    else out+='\n\n### Test cases\n'+tl.map(({r,t})=>`- [${t.status==='Passed'?'x':' '}] ${r.id}: ${t.title} (${t.type}, ${t.status})`).join('\n');
+  }
   $('out').value=out;$('expMsg').textContent=l.length?`${l.length} requirements exported.`:'Nothing to export. Untick the filter to include requirements that already have a work item.';
 }
 
 /* events */
 document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#doImport,#doExport,#copyExport');if(!t)return;
-  if(t.id==='doImport')importWork();
+  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#doImport,#doExport,#copyExport,[data-addtest],[data-rmtest]');if(!t)return;
+  if(t.dataset.addtest){readDraft();S.editing.draft.tests.push({title:'',type:'Unit',status:'Not run'});sync(S.editing.draft);renderEditor();const ti=document.querySelectorAll('.tc-title');ti[ti.length-1]?.focus()}
+  else if(t.dataset.rmtest!=null){readDraft();S.editing.draft.tests.splice(Number(t.dataset.rmtest),1);renderEditor()}
+  else if(t.id==='doImport')importWork();
   else if(t.id==='doExport')exportWork();
   else if(t.id==='copyExport'){const o=$('out');if(!o.value){$('expMsg').textContent='Generate an export first.';return}
     const fb=()=>{o.select();$('expMsg').textContent='Select and copy the text above.'};
