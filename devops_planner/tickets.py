@@ -5,6 +5,7 @@ import csv
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 # canonical field -> accepted column/key names (lower-cased, spaces/underscores ignored)
@@ -17,6 +18,10 @@ ALIASES = {
     "state": ["state", "status"],
     "assignee": ["assignee", "assignedto", "owner"],
     "labels": ["labels", "tags"],
+    "area": ["area", "areapath", "component"],
+    "parent": ["parent", "parentid", "parentworkitemid", "parentkey", "epiclink"],
+    "changed": ["changeddate", "updated", "lastupdated", "statechangedate", "modified"],
+    "days": ["days", "durationdays", "effortdays"],
     "depends_on": ["dependson", "dependencies", "predecessors", "blockedby", "blocks_inverse"],
 }
 DONE_STATES = {"done", "closed", "resolved", "completed", "removed", "cancelled", "canceled"}
@@ -37,6 +42,14 @@ class Ticket:
     assignee: str = ""
     labels: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
+    area: str = ""
+    parent: str = ""
+    changed: datetime | None = None
+    days: float | None = None
+
+    @property
+    def area_parts(self) -> list[str]:
+        return [p.strip() for p in re.split(r"[\\/>]+", self.area) if p.strip()]
 
     @property
     def done(self) -> bool:
@@ -53,6 +66,22 @@ def _split(v) -> list[str]:
     if isinstance(v, (list, tuple)):
         return [str(x).strip() for x in v if str(x).strip()]
     return [p.strip() for p in re.split(r"[;,|\s]+", str(v)) if p.strip()]
+
+
+TYPE_MAP = {"user story": "story", "product backlog item": "story", "pbi": "story", "backlog item": "story",
+            "improvement": "story", "new feature": "feature", "sub-task": "task", "subtask": "task", "defect": "bug"}
+
+
+def _date(v) -> datetime | None:
+    if not v:
+        return None
+    s = str(v).strip().replace("Z", "+00:00")
+    for f in (datetime.fromisoformat, lambda x: datetime.strptime(x, "%d/%m/%Y"), lambda x: datetime.strptime(x, "%m/%d/%Y")):
+        try:
+            return f(s).replace(tzinfo=None)
+        except ValueError:
+            pass
+    return None
 
 
 def _number(v) -> float | None:
@@ -78,13 +107,17 @@ def _ticket(row: dict) -> Ticket:
     return Ticket(
         id=str(got["id"]).strip(),
         title=str(got.get("title", "")).strip(),
-        type=str(got.get("type", "task")).strip().lower(),
+        type=TYPE_MAP.get(str(got.get("type", "task")).strip().lower(), str(got.get("type", "task")).strip().lower()),
         priority=PRIORITY_RANK.get(prio, 2),
         estimate=_number(got.get("estimate")),
         state=str(got.get("state", "todo")).strip(),
         assignee=str(got.get("assignee", "")).strip(),
         labels=_split(got.get("labels")),
         depends_on=_split(got.get("depends_on")),
+        area=str(got.get("area", "")).strip(),
+        parent=str(got.get("parent", "")).strip(),
+        changed=_date(got.get("changed")),
+        days=_number(got.get("days")),
     )
 
 
