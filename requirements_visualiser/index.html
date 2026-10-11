@@ -142,6 +142,14 @@ h4{font:600 14px var(--font-display);margin:4px 0 8px}
 .ac-row{display:grid;grid-template-columns:auto 1fr auto;gap:6px;align-items:center;padding:4px 0}
 .ac td.crit{max-width:60ch}
 .ac tr.first td{border-top:2px solid var(--line)}
+.rp-ctl{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:10px;margin-bottom:14px}
+.rp-ctl label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted);font-weight:500}
+.rp-ctl label>*{color:var(--fg);font-size:14px;font-weight:400}
+.rp-ctl .wide,.rp-ctl .actions{grid-column:1/-1}
+.rp-ctl textarea{min-height:70px;resize:vertical}
+@media(max-width:600px){.rp-ctl{grid-template-columns:minmax(0,1fr)}}
+#sheetWrap{overflow-x:auto;padding:4px}
+#sheet{max-width:860px;min-width:640px;margin:0 auto;padding:28px 32px;background:#ffffff;border:1px solid var(--line);box-shadow:0 1px 6px rgba(0,0,0,.12)}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 
@@ -347,7 +355,7 @@ function renderChrome(){
   $('legend').innerHTML=PRI.map(p=>`<span><span class="dot" style="background:var(--${p.toLowerCase()})"></span>${PLABEL[p]} ${eff[p]} pts</span>`).join('');
   const fl=flags();
   $('flags').innerHTML=fl.length?fl.slice(0,12).map((x,i)=>`<button class="flag ${x.sev}" data-id="${esc(x.id)}"><small>${esc(x.id)}</small>${esc(x.t)}</button>`).join('')+(fl.length>12?`<span class="msg" style="align-self:center">+${fl.length-12} more</span>`:''):'<span class="msg">No gaps or conflicts found.</span>';
-  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['criteria','Acceptance'],['tests','Tests'],['delivery','Delivery'],['table','Table']]
+  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['criteria','Acceptance'],['tests','Tests'],['delivery','Delivery'],['report','Weekly report'],['table','Table']]
     .map(([k,l])=>`<button class="tab" role="tab" data-tab="${k}" aria-selected="${S.tab===k}">${l}</button>`).join('');
   $('ftype').innerHTML='<option value="">All types</option>'+TYPES.map(t=>`<option ${S.ftype===t?'selected':''}>${t}</option>`).join('');
   $('fstatus').innerHTML='<option value="">All statuses</option>'+STATUS.map(t=>`<option ${S.fstatus===t?'selected':''}>${t}</option>`).join('');
@@ -479,9 +487,115 @@ function criteriaView(rs){
   return `${meters}<p class="hint">A criterion is verified when every test case linked to it has passed. Link test cases to criteria in the requirement editor.</p>
    <table class="ac"><thead><tr><th>Requirement</th><th>ID</th><th>Criterion</th><th>Status</th><th class="num">Tests passed</th></tr></thead><tbody>${body}</tbody></table>`;
 }
+/* weekly report */
+const RPK='req-visualiser-report',SNK='req-visualiser-snap';
+const today=()=>new Date().toISOString().slice(0,10);
+const fmtDate=iso=>{const d=new Date(iso+'T00:00:00');return isNaN(d)?iso:d.toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})};
+function initReport(){
+  S.rp={name:'Customer Self-Service Portal',date:today(),notes:''};
+  try{Object.assign(S.rp,JSON.parse(localStorage.getItem(RPK))||{})}catch(e){}
+}
+const saveRp=()=>{try{localStorage.setItem(RPK,JSON.stringify(S.rp))}catch(e){}};
+const loadSnap=()=>{try{return JSON.parse(localStorage.getItem(SNK))}catch(e){return null}};
+function metrics(){
+  const live=S.reqs.filter(r=>r.priority!=='Wont'),musts=live.filter(r=>r.priority==='Must'),fl=flags();
+  const cs=live.flatMap(r=>r.criteria.map(c=>critStatus(r,c))),ts=live.flatMap(r=>r.tests);
+  return {reqs:S.reqs.length,points:S.reqs.reduce((a,r)=>a+r.effort,0),mustLive:musts.filter(r=>r.env==='Production').length,mustTotal:musts.length,
+    critOk:cs.filter(s=>s==='Verified').length,critTotal:cs.length,testsOk:ts.filter(t=>t.status==='Passed').length,testsRan:ts.filter(t=>t.status!=='Not run').length,testsTotal:ts.length,
+    buildsOk:live.filter(r=>r.build==='passing').length,buildsTotal:live.filter(r=>r.build!=='none').length,
+    bad:fl.filter(f=>f.sev==='bad').length,warn:fl.filter(f=>f.sev==='warn').length};
+}
+function reportModel(){
+  const m=metrics(),snap=loadSnap(),fl=flags(),title=r=>S.reqs.find(x=>x.id===r)?.title||'';
+  const live=S.reqs.filter(r=>r.priority!=='Wont'),plural=(n,w)=>n+' '+w+(n===1?'':'s');
+  const failB=live.filter(r=>r.build==='failing'),mustF=live.filter(r=>r.priority==='Must'&&r.tests.some(t=>t.status==='Failed'));
+  const reasons=[];let lv=0;
+  if(failB.length){reasons.push(`${plural(failB.length,'build')} failing (${failB.map(r=>r.id).join(', ')})`);lv=2}
+  if(mustF.length){reasons.push(`Failed tests on Must requirements (${mustF.map(r=>r.id).join(', ')})`);lv=2}
+  if(m.bad>=5)lv=2;
+  if(m.bad){reasons.push(`${plural(m.bad,'open risk')}`);lv=Math.max(lv,1)}
+  if(m.warn>=5){reasons.push(`${m.warn} items on the watch list`);lv=Math.max(lv,1)}
+  const rag=[{label:'Green',color:'#2a7a5f'},{label:'Amber',color:'#a36a00'},{label:'Red',color:'#b4401c'}][lv];
+  const dl=(cur,key,hb)=>{if(!snap)return {t:'–'};const d=cur-snap.m[key];if(!d)return {t:'No change'};
+    return {t:(d>0?'+':'−')+Math.abs(d),c:hb==null?'':((d>0)===hb?'good':'bad')}};
+  const pct=(a,b)=>b?Math.round(100*a/b):0;
+  const sec=[];
+  sec.push({h:'Key numbers',kind:'table',head:['Measure','Now',snap?'Since '+fmtDate(snap.date):'Change'],rows:[
+    ['Requirements',m.reqs,dl(m.reqs,'reqs')],['Effort points',m.points,dl(m.points,'points')],
+    ['Must requirements live',`${m.mustLive} of ${m.mustTotal}`,dl(m.mustLive,'mustLive',true)],
+    ['Acceptance criteria verified',`${m.critOk} of ${m.critTotal} (${pct(m.critOk,m.critTotal)}%)`,dl(m.critOk,'critOk',true)],
+    ['Tests passing',`${m.testsOk} of ${m.testsTotal} (${m.testsRan} run)`,dl(m.testsOk,'testsOk',true)],
+    ['Builds passing',`${m.buildsOk} of ${m.buildsTotal}`,dl(m.buildsOk,'buildsOk',true)],
+    ['Open risks',m.bad,dl(m.bad,'bad',false)],['Watch list items',m.warn,dl(m.warn,'warn',false)]]});
+  sec.push({h:'Scope by priority',kind:'table',head:['Priority','Requirements','Effort points','In production'],rows:PRI.map(p=>{const l=S.reqs.filter(r=>r.priority===p);
+    return [PLABEL[p],l.length,l.reduce((a,r)=>a+r.effort,0),p==='Wont'?'–':`${l.filter(r=>r.env==='Production').length} of ${l.length}`]})});
+  const risks=fl.filter(f=>f.sev==='bad').map(f=>`${f.id} ${title(f.id)}: ${f.t}`);
+  sec.push(risks.length?{h:'Risks and blockers',kind:'list',items:risks.slice(0,10).concat(risks.length>10?[`${risks.length-10} more in the tool`]:[])}:{h:'Risks and blockers',kind:'text',text:'No open risks.'});
+  const watch=fl.filter(f=>f.sev==='warn').map(f=>`${f.id} ${title(f.id)}: ${f.t}`);
+  if(watch.length)sec.push({h:'Watch list',kind:'list',items:watch.slice(0,8).concat(watch.length>8?[`${watch.length-8} more in the tool`]:[])});
+  const badT=live.flatMap(r=>r.tests.filter(t=>t.status==='Failed'||t.status==='Blocked').map(t=>[r.id,t.title,t.type,{t:t.status,c:t.status==='Failed'?'bad':''}]));
+  if(badT.length)sec.push({h:'Failed and blocked tests',kind:'table',head:['Requirement','Test','Type','Status'],rows:badT});
+  const sp={};live.forEach(r=>{(sp[r.sprint||'Unplanned']??=[]).push(r)});
+  const keys=Object.keys(sp).sort((a,b)=>a==='Unplanned'?1:b==='Unplanned'?-1:a.localeCompare(b,undefined,{numeric:true}));
+  sec.push({h:'Delivery by sprint',kind:'table',head:['Sprint','Items','Effort points','In production'],rows:keys.map(k=>[k,sp[k].length,sp[k].reduce((a,r)=>a+r.effort,0),`${sp[k].filter(r=>r.env==='Production').length} of ${sp[k].length}`])});
+  const next=live.filter(r=>r.env!=='Production'&&r.sprint).sort((a,b)=>a.sprint.localeCompare(b.sprint,undefined,{numeric:true})||PRI.indexOf(a.priority)-PRI.indexOf(b.priority)).slice(0,8);
+  if(next.length)sec.push({h:'Coming up',kind:'table',head:['Requirement','Priority','Sprint','Owner','Status'],rows:next.map(r=>[`${r.id} ${r.title}`,r.priority==='Wont'?'Won’t':r.priority,r.sprint,r.assignee||'Unassigned',`${r.status}, ${r.env==='Not started'?'not started':'in '+r.env}`])});
+  return {title:S.rp.name||'Requirements update',subtitle:'Requirements update, week ending '+fmtDate(S.rp.date),rag,reasons,notes:S.rp.notes.trim(),sections:sec,
+    summary:`${m.mustLive} of ${m.mustTotal} Must requirements are live. ${m.critOk} of ${m.critTotal} acceptance criteria are verified and ${m.testsOk} of ${m.testsRan} executed tests pass. ${m.bad?plural(m.bad,'risk')+' need'+(m.bad===1?'s':'')+' attention.':'There are no open risks.'}`};
+}
+function reportHTML(m){
+  const C={ink:'#17212b',mut:'#5b6876',line:'#d3dae1',head:'#eef2f5',good:'#2a7a5f',bad:'#b4401c'};
+  const cell=(c,th)=>{const o=c&&typeof c==='object'?c:{t:c},tag=th?'th':'td';
+    return `<${tag} style="padding:6px 10px;border-bottom:1px solid ${C.line};text-align:left;vertical-align:top;${th?`background:${C.head};font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:${C.mut};`:`font-size:13px;color:${o.c==='good'?C.good:o.c==='bad'?C.bad:C.ink};${o.c?'font-weight:600;':''}`}">${esc(o.t)}</${tag}>`};
+  const body=m.sections.map(s=>{
+    const h=`<h2 style="font-size:15px;margin:22px 0 8px;color:${C.ink};border-bottom:2px solid ${C.ink};padding-bottom:4px">${esc(s.h)}</h2>`;
+    if(s.kind==='text')return h+`<p style="margin:0;font-size:13px;color:${C.ink}">${esc(s.text)}</p>`;
+    if(s.kind==='list')return h+`<ul style="margin:0;padding-left:20px;font-size:13px;color:${C.ink}">${s.items.map(i=>`<li style="margin:3px 0">${esc(i)}</li>`).join('')}</ul>`;
+    return h+`<table style="border-collapse:collapse;width:100%"><thead><tr>${s.head.map(x=>cell(x,1)).join('')}</tr></thead><tbody>${s.rows.map(r=>`<tr>${r.map(x=>cell(x)).join('')}</tr>`).join('')}</tbody></table>`}).join('');
+  return `<div style="font-family:'Segoe UI',Arial,sans-serif;color:${C.ink};background:#ffffff;line-height:1.45">
+   <table role="presentation" style="width:100%;border-collapse:collapse"><tr><td style="vertical-align:top"><div style="font-size:24px;font-weight:700">${esc(m.title)}</div><div style="font-size:13px;color:${C.mut};margin-top:2px">${esc(m.subtitle)}</div></td>
+   <td style="text-align:right;vertical-align:top"><span style="display:inline-block;background:${m.rag.color};color:#ffffff;font-weight:700;font-size:13px;padding:5px 14px">${m.rag.label}</span></td></tr></table>
+   ${m.reasons.length?`<p style="font-size:12.5px;color:${C.mut};margin:8px 0 0">${esc(m.reasons.join('; '))}</p>`:''}
+   <p style="font-size:14px;margin:14px 0 0">${esc(m.summary)}</p>
+   ${m.notes?`<div style="margin:14px 0 0;padding:10px 14px;background:${C.head};border-left:4px solid ${C.ink};font-size:13px;white-space:pre-wrap">${esc(m.notes)}</div>`:''}
+   ${body}<p style="font-size:11px;color:${C.mut};margin:24px 0 0">Prepared ${esc(fmtDate(today()))} from the requirements register.</p></div>`;
+}
+function reportMd(m){
+  const c=x=>String(x&&typeof x==='object'?x.t:x).replace(/\|/g,'\\|');
+  let o=`# ${m.title}\n**${m.subtitle}** | Status: **${m.rag.label}**\n\n`+(m.reasons.length?`_${m.reasons.join('; ')}_\n\n`:'')+m.summary+'\n\n';
+  if(m.notes)o+=m.notes.split('\n').map(l=>'> '+l).join('\n')+'\n\n';
+  m.sections.forEach(s=>{o+=`## ${s.h}\n`;
+    if(s.kind==='text')o+=s.text+'\n\n';else if(s.kind==='list')o+=s.items.map(i=>'- '+i).join('\n')+'\n\n';
+    else o+=`| ${s.head.join(' | ')} |\n|${s.head.map(()=>'---').join('|')}|\n`+s.rows.map(r=>`| ${r.map(c).join(' | ')} |`).join('\n')+'\n\n'});
+  return o.trim()+'\n';
+}
+function reportView(){
+  return `<div class="rp-ctl"><label>Project name<input type="text" id="rp-name" value="${esc(S.rp.name)}"></label>
+   <label>Week ending<input type="date" id="rp-date" value="${esc(S.rp.date)}"></label>
+   <label class="wide">Commentary for the update<textarea id="rp-notes" placeholder="Headline, decisions needed, anything the numbers do not show">${esc(S.rp.notes)}</textarea></label>
+   <div class="actions"><button class="btn primary" id="rpRich">Copy for email</button><button class="btn" id="rpMd">Copy as Markdown</button><button class="btn" id="rpSnap">Save snapshot for next week</button><span class="msg" id="rpMsg" role="status"></span></div></div>
+   <p class="hint">The report covers every requirement and ignores the filters above. Paste it into Outlook, Teams or Word with formatting kept, or use Markdown for Confluence and GitHub. Save a snapshot after sending so next week's report shows what changed.</p>
+   <div id="sheetWrap"><div id="sheet">${reportHTML(reportModel())}</div></div>`;
+}
+async function copyRich(){
+  const el=$('sheet'),msg=$('rpMsg');
+  try{await navigator.clipboard.write([new ClipboardItem({'text/html':new Blob([el.innerHTML],{type:'text/html'}),'text/plain':new Blob([el.innerText],{type:'text/plain'})})]);msg.textContent='Copied. Paste into your email with Ctrl+V.';return}catch(e){}
+  try{const r=document.createRange();r.selectNodeContents(el);const s=getSelection();s.removeAllRanges();s.addRange(r);
+    msg.textContent=document.execCommand('copy')?'Copied. Paste into your email with Ctrl+V.':'The report is selected. Press Ctrl+C to copy it.'}catch(e){msg.textContent='Select the report and press Ctrl+C.'}
+}
+function copyMd(){
+  const t=reportMd(reportModel()),msg=$('rpMsg');
+  const fb=()=>{const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();let ok=false;try{ok=document.execCommand('copy')}catch(e){}a.remove();msg.textContent=ok?'Markdown copied.':'Copy failed. Use Copy for email instead.'};
+  (navigator.clipboard?.writeText(t).then(()=>msg.textContent='Markdown copied.',fb))||fb();
+}
+function saveSnap(){
+  try{localStorage.setItem(SNK,JSON.stringify({date:S.rp.date,m:metrics()}));$('rpMsg').textContent='Snapshot saved. Next week’s report will show changes against it.'}
+  catch(e){$('rpMsg').textContent='This browser blocked saving the snapshot.'}
+  $('sheet').innerHTML=reportHTML(reportModel());
+}
 function renderView(){
   const rs=visible();
-  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView,tests:testsView,criteria:criteriaView})[S.tab](rs);
+  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView,tests:testsView,criteria:criteriaView,report:reportView})[S.tab](rs);
 }
 
 /* editor */
@@ -616,8 +730,9 @@ function exportWork(){
 
 /* events */
 document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#doImport,#doExport,#copyExport,[data-addtest],[data-rmtest],[data-addac],[data-rmac]');if(!t)return;
-  if(t.dataset.addac){readDraft();const d=S.editing.draft;let k=d.criteria.length+1;while(d.criteria.some(c=>c.id==='AC'+k))k++;
+  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#doImport,#doExport,#copyExport,[data-addtest],[data-rmtest],[data-addac],[data-rmac],#rpRich,#rpMd,#rpSnap');if(!t)return;
+  if(t.id==='rpRich')copyRich();else if(t.id==='rpMd')copyMd();else if(t.id==='rpSnap')saveSnap();
+  else if(t.dataset.addac){readDraft();const d=S.editing.draft;let k=d.criteria.length+1;while(d.criteria.some(c=>c.id==='AC'+k))k++;
     d.criteria.push({id:'AC'+k,text:''});renderEditor();const ti=document.querySelectorAll('.ac-text');ti[ti.length-1]?.focus()}
   else if(t.dataset.rmac!=null){readDraft();const d=S.editing.draft,c=d.criteria.splice(Number(t.dataset.rmac),1)[0];d.tests.forEach(x=>{if(c&&x.ac===c.id)x.ac=''});renderEditor()}
   else if(t.dataset.addtest){readDraft();S.editing.draft.tests.push({title:'',type:'Unit',status:'Not run'});sync(S.editing.draft);renderEditor();const ti=document.querySelectorAll('.tc-title');ti[ti.length-1]?.focus()}
@@ -646,5 +761,9 @@ document.addEventListener('submit',e=>{if(e.target.id==='form'){e.preventDefault
 $('q').addEventListener('input',e=>{S.q=e.target.value;renderView()});
 $('ftype').addEventListener('change',e=>{S.ftype=e.target.value;renderView()});
 $('fstatus').addEventListener('change',e=>{S.fstatus=e.target.value;renderView()});
-init();renderAll();
+document.addEventListener('input',e=>{
+  const k={'rp-name':'name','rp-date':'date','rp-notes':'notes'}[e.target.id];if(!k)return;
+  S.rp[k]=e.target.value;saveRp();$('sheet').innerHTML=reportHTML(reportModel());
+});
+init();initReport();renderAll();
 </script>
