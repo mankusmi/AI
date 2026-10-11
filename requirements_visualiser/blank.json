@@ -1,0 +1,26 @@
+[
+  {
+    "id": "REQ-01",
+    "title": "Replace this with your first requirement",
+    "description": "",
+    "type": "Functional",
+    "priority": "Must",
+    "status": "Draft",
+    "stakeholder": "",
+    "goals": [],
+    "effort": 0,
+    "depends": [],
+    "criteria": [
+      { "id": "AC1", "text": "Given ..., when ..., then ..." }
+    ],
+    "tests": [
+      { "title": "", "type": "Unit", "status": "Not run", "ac": "AC1" }
+    ],
+    "workItem": "",
+    "pr": "",
+    "sprint": "",
+    "assignee": "",
+    "env": "Not started",
+    "build": "none"
+  }
+]
