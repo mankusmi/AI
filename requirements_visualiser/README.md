@@ -1,6 +1,6 @@
 # Requirements Visualiser
 
-`index.html` is a single-file page. Open it in a browser; there is nothing to install and it makes no network calls. Data is kept in the browser's local storage.
+`index.html` is a single-file page. Open it in a browser; there is nothing to install. It makes no network requests (system fonts only, no libraries or analytics) and uses no AI. Data is kept in the browser's local storage.
 
 A single-page tool for keeping business requirements in one place and seeing them from several angles.
 
