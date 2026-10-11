@@ -1,0 +1,13 @@
+ID,Title,Work Item Type,Story Points,State,Assigned To,Area Path,Parent,Changed Date
+E1,Platform modernisation programme,Epic,,Active,alice,Proj\Platform,,2026-09-20
+E2,Fix login button colour,Epic,1,New,,Proj\Web\Auth,,2026-09-01
+F1,Kubernetes migration,Feature,40,Active,bob,Proj\Platform\Compute,E1,2026-10-01
+F2,Network segmentation,Feature,6,New,carol,Proj\Platform\Network,E1,2026-09-28
+F3,Single story container,Feature,,New,carol,Proj\Platform\Network,E1,2026-09-28
+S1,Create cluster terraform module,User Story,3,Active,bob,Proj\Platform\Compute,F1,2026-10-05
+S2,Build ingress controller config,User Story,13,New,,Proj\Platform\Compute,F1,2026-10-02
+S3,Define VLANs and subnets,User Story,4,New,carol,Proj\Platform\Network,F2,2026-09-30
+S4,Rotate API keys,User Story,2,Active,,Proj,,2026-10-08
+S5,Rotate API keys,User Story,2,New,,Proj,,2025-01-10
+S6,Add dashboards,User Story,3,New,dave,Proj\Observability,F2,2026-08-01
+T1,fix,Task,1,New,dave,,S4,
