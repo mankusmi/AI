@@ -1,0 +1,371 @@
+<title>Requirements Visualiser</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: sticky summary header, tabbed workspace (board, dependency map, traceability, table), editor drawer on the right that stacks below at phone width. */
+:root{
+  --bg:#f3f5f7; --surface:#ffffff; --surface2:#e9edf1; --line:#d3dae1; --fg:#17212b; --muted:#5b6876;
+  --accent:#1f5f8b; --accent-fg:#ffffff; --accent-soft:#dbe9f3;
+  --must:#b4401c; --should:#a36a00; --could:#2a7a5f; --wont:#6b7580;
+  --must-bg:#f8e3da; --should-bg:#f6ebcf; --could-bg:#d9eee6; --wont-bg:#e4e8ec;
+  --warn:#a36a00; --bad:#b4401c;
+  --font-display:'Bricolage Grotesque','Segoe UI',system-ui,sans-serif;
+  --font-body:'IBM Plex Sans','Segoe UI',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#10161c; --surface:#18212a; --surface2:#222d38; --line:#2f3d4b; --fg:#e6ecf2; --muted:#9aa8b6;
+  --accent:#6fb3e0; --accent-fg:#0b141b; --accent-soft:#1f3345;
+  --must:#f08a63; --should:#e3b341; --could:#58c09f; --wont:#93a0ad;
+  --must-bg:#3a2219; --should-bg:#352a10; --could-bg:#15322a; --wont-bg:#26303a;
+  --warn:#e3b341; --bad:#f08a63; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#10161c; --surface:#18212a; --surface2:#222d38; --line:#2f3d4b; --fg:#e6ecf2; --muted:#9aa8b6;
+  --accent:#6fb3e0; --accent-fg:#0b141b; --accent-soft:#1f3345;
+  --must:#f08a63; --should:#e3b341; --could:#58c09f; --wont:#93a0ad;
+  --must-bg:#3a2219; --should-bg:#352a10; --could-bg:#15322a; --wont-bg:#26303a;
+  --warn:#e3b341; --bad:#f08a63; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-body);font-size:14px;line-height:1.45;padding-inline:16px;padding-block:16px 40px}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.wrap{max-width:1400px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+h1{font:700 26px/1.1 var(--font-display);margin:0;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:4px 0 0;max-width:70ch}
+.top{display:flex;flex-wrap:wrap;gap:12px 24px;justify-content:space-between;align-items:flex-end}
+.stats{display:flex;flex-wrap:wrap;gap:8px}
+.stat{background:var(--surface);border:1px solid var(--line);padding:6px 12px;min-width:84px}
+.stat b{display:block;font:600 20px var(--font-display);font-variant-numeric:tabular-nums}
+.stat span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.bar{display:flex;height:10px;background:var(--surface2);border:1px solid var(--line)}
+.bar i{display:block;height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12px;color:var(--muted)}
+.dot{display:inline-block;width:9px;height:9px;margin-right:5px;vertical-align:baseline}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.tabs{display:flex;gap:2px;flex-wrap:wrap}
+.tab{background:transparent;border:1px solid transparent;border-bottom:2px solid transparent;padding:7px 12px;color:var(--muted);font-weight:500}
+.tab[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--accent);background:var(--surface)}
+.grow{flex:1}
+input[type=search],select,input[type=text],input[type=number],textarea{background:var(--surface);border:1px solid var(--line);padding:6px 8px;border-radius:3px;min-width:0}
+input[type=search]{width:190px}
+.btn{background:var(--surface);border:1px solid var(--line);padding:6px 12px;border-radius:3px}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
+.btn.danger{color:var(--bad)}
+.work{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start}
+.work.noedit{grid-template-columns:minmax(0,1fr)}
+@media(max-width:900px){.work{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--surface);border:1px solid var(--line);min-width:0}
+.view{padding:14px;overflow-x:auto}
+.flags{display:flex;flex-wrap:wrap;gap:6px}
+.flag{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--warn);padding:5px 10px;font-size:12.5px;text-align:left}
+.flag.bad{border-left-color:var(--bad)}
+.flag:hover{border-color:var(--accent)}
+.flag small{color:var(--muted);font-family:var(--font-mono);margin-right:6px}
+.mono{font-family:var(--font-mono);font-size:12px}
+.pill{display:inline-block;padding:1px 7px;font-size:11px;font-weight:600;letter-spacing:.03em;border-radius:2px}
+.p-Must{background:var(--must-bg);color:var(--must)}.p-Should{background:var(--should-bg);color:var(--should)}
+.p-Could{background:var(--could-bg);color:var(--could)}.p-Wont{background:var(--wont-bg);color:var(--wont)}
+/* board */
+.board{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:10px;min-width:920px}
+.col h3{margin:0 0 8px;font:600 14px var(--font-display);display:flex;justify-content:space-between;border-bottom:2px solid var(--line);padding-bottom:6px}
+.col.Must h3{border-color:var(--must)}.col.Should h3{border-color:var(--should)}.col.Could h3{border-color:var(--could)}.col.Wont h3{border-color:var(--wont)}
+.col h3 span{font:400 12px var(--font-mono);color:var(--muted)}
+.cards{display:flex;flex-direction:column;gap:8px}
+.card{background:var(--bg);border:1px solid var(--line);padding:9px 10px;text-align:left;display:flex;flex-direction:column;gap:5px;width:100%}
+.card:hover,.card.sel{border-color:var(--accent)}
+.card.sel{box-shadow:0 0 0 1px var(--accent)}
+.card .t{font-weight:500}
+.meta{display:flex;flex-wrap:wrap;gap:4px 10px;color:var(--muted);font-size:12px}
+/* table */
+table{border-collapse:collapse;width:100%}
+th,td{padding:7px 9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;white-space:nowrap}
+tbody tr{cursor:pointer}tbody tr:hover{background:var(--surface2)}tbody tr.sel{background:var(--accent-soft)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+/* matrix */
+.matrix th.g{height:130px;vertical-align:bottom;padding:4px}
+.matrix th.g span{writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap;text-transform:none;letter-spacing:0;font-size:12.5px;color:var(--fg)}
+.matrix td.c{text-align:center;width:36px;padding:4px}
+.matrix td.c i{display:inline-block;width:14px;height:14px;border-radius:50%}
+.matrix tfoot td{font-size:12px;color:var(--muted);font-weight:600;border-top:2px solid var(--line)}
+.matrix td.c.gap{background:repeating-linear-gradient(45deg,transparent 0 5px,var(--must-bg) 5px 7px)}
+/* graph */
+svg text{font-family:var(--font-body)}
+.gnode rect{fill:var(--bg);stroke:var(--line);stroke-width:1}
+.gnode{cursor:pointer}.gnode:hover rect{stroke:var(--accent)}
+.gnode.sel rect{stroke:var(--accent);stroke-width:2}
+.gnode .id{font:500 10.5px var(--font-mono);fill:var(--muted)}
+.gnode .tt{font-size:12px;fill:var(--fg);font-weight:500}
+.gedge{fill:none;stroke:var(--muted);stroke-width:1.3;opacity:.55}
+.gedge.hi{stroke:var(--accent);opacity:1;stroke-width:2}
+.dim{opacity:.18}
+.gtip{fill:var(--muted);font-size:11px}
+.hint{color:var(--muted);font-size:12.5px;margin:0 0 10px}
+/* editor */
+.editor{padding:14px;display:flex;flex-direction:column;gap:10px}
+.editor h2{font:600 16px var(--font-display);margin:0;display:flex;justify-content:space-between;align-items:center}
+.editor label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted);font-weight:500}
+.editor label>*:not(span){color:var(--fg);font-size:14px;font-weight:400}
+.editor textarea{min-height:64px;resize:vertical}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.deps{max-height:130px;overflow:auto;border:1px solid var(--line);padding:6px;display:flex;flex-direction:column;gap:3px;background:var(--surface)}
+.deps label{flex-direction:row;align-items:center;gap:6px;color:var(--fg);font-size:12.5px}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.empty{color:var(--muted);padding:24px 8px;text-align:center}
+details{background:var(--surface);border:1px solid var(--line);padding:8px 12px}
+summary{cursor:pointer;font-weight:500}
+details textarea{width:100%;min-height:140px;margin-top:8px;font-family:var(--font-mono);font-size:12px}
+.msg{font-size:12.5px;color:var(--muted)}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1>Requirements Visualiser</h1>
+      <p class="sub">Edit a requirements set and see it as a priority board, a dependency map and a goal traceability matrix. Gaps and conflicts are flagged as you type. Sample data is loaded; replace it with your own.</p>
+    </div>
+    <div class="stats" id="stats"></div>
+  </div>
+  <div>
+    <div class="bar" id="bar" title="Effort by priority"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+  <div class="flags" id="flags"></div>
+
+  <div class="toolbar">
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <span class="grow"></span>
+    <input type="search" id="q" placeholder="Search requirements" aria-label="Search requirements">
+    <select id="ftype" aria-label="Filter by type"></select>
+    <select id="fstatus" aria-label="Filter by status"></select>
+    <button class="btn primary" id="add">+ New requirement</button>
+  </div>
+
+  <div class="work" id="work">
+    <div class="panel view" id="view"></div>
+    <div class="panel" id="editorWrap" hidden></div>
+  </div>
+
+  <details>
+    <summary>Import, export and reset</summary>
+    <p class="msg">Copy the JSON to keep a backup, or paste your own requirements and load them. Fields: id, title, description, type, priority (Must, Should, Could, Wont), status, stakeholder, goals (list), effort (points), depends (list of ids).</p>
+    <textarea id="json" aria-label="Requirements JSON" spellcheck="false"></textarea>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn" id="copy">Copy JSON</button>
+      <button class="btn" id="load">Load from box</button>
+      <button class="btn danger" id="reset">Reset to sample</button>
+      <span class="msg" id="ioMsg" role="status"></span>
+    </div>
+  </details>
+</div>
+
+<script>
+const PRI=['Must','Should','Could','Wont'];
+const PLABEL={Must:'Must have',Should:'Should have',Could:'Could have',Wont:'Won’t have'};
+const TYPES=['Business','Functional','Non-functional','Constraint'];
+const STATUS=['Draft','Reviewed','Approved','Built','Verified'];
+const SAMPLE=[
+ {id:'REQ-01',title:'Customers can sign in with a single account',description:'One login for policy, claims and billing, with email and password plus MFA.',type:'Functional',priority:'Must',status:'Approved',stakeholder:'Head of Digital',goals:['Reduce call volume','Improve customer retention'],effort:8,depends:[]},
+ {id:'REQ-02',title:'View current policy documents',description:'List active policies with downloadable schedules and certificates.',type:'Functional',priority:'Must',status:'Approved',stakeholder:'Customer Service',goals:['Reduce call volume'],effort:5,depends:['REQ-01']},
+ {id:'REQ-03',title:'Submit a claim online',description:'Guided first notification of loss with photo upload and claim reference.',type:'Functional',priority:'Must',status:'Reviewed',stakeholder:'Claims Director',goals:['Reduce call volume','Cut claim handling cost'],effort:13,depends:['REQ-01','REQ-06']},
+ {id:'REQ-04',title:'Track claim status in real time',description:'Show each claim stage and expected next step.',type:'Functional',priority:'Should',status:'Draft',stakeholder:'Claims Director',goals:['Improve customer retention','Reduce call volume'],effort:8,depends:['REQ-03']},
+ {id:'REQ-05',title:'Pay premiums by card or direct debit',description:'Take one-off and recurring payments through the approved payment provider.',type:'Functional',priority:'Should',status:'Draft',stakeholder:'Finance',goals:['Improve customer retention'],effort:8,depends:['REQ-01','REQ-07']},
+ {id:'REQ-06',title:'Claims system API available to the portal',description:'Expose create, read and update claim operations to the portal.',type:'Constraint',priority:'Could',status:'Draft',stakeholder:'IT Architecture',goals:['Cut claim handling cost'],effort:13,depends:[]},
+ {id:'REQ-07',title:'Integrate payment provider',description:'Tokenised card storage, no card data held by the portal.',type:'Constraint',priority:'Must',status:'Reviewed',stakeholder:'Finance',goals:['Meet regulatory obligations'],effort:5,depends:[]},
+ {id:'REQ-08',title:'Pages load in under 2 seconds at the 95th percentile',description:'Measured on a 4G connection from UK locations.',type:'Non-functional',priority:'Should',status:'Approved',stakeholder:'Head of Digital',goals:['Improve customer retention'],effort:3,depends:[]},
+ {id:'REQ-09',title:'Meet WCAG 2.2 AA accessibility',description:'All journeys pass audit with assistive technology.',type:'Non-functional',priority:'Must',status:'Approved',stakeholder:'Compliance',goals:['Meet regulatory obligations'],effort:5,depends:[]},
+ {id:'REQ-10',title:'Audit log of every customer data change',description:'Immutable log retained for seven years.',type:'Non-functional',priority:'Must',status:'Draft',stakeholder:'Compliance',goals:['Meet regulatory obligations'],effort:5,depends:['REQ-01']},
+ {id:'REQ-11',title:'Live chat with an adviser',description:'Chat widget routed to the contact centre during opening hours.',type:'Functional',priority:'Could',status:'Draft',stakeholder:'Customer Service',goals:['Reduce call volume'],effort:8,depends:['REQ-01']},
+ {id:'REQ-12',title:'Native mobile app',description:'iOS and Android apps with push notifications.',type:'Business',priority:'Wont',status:'Reviewed',stakeholder:'Head of Digital',goals:['Improve customer retention'],effort:21,depends:['REQ-03','REQ-04']},
+ {id:'REQ-13',title:'Reduce paper correspondence',description:'Move at least 60% of customers to digital-only documents in year one.',type:'Business',priority:'Should',status:'Approved',stakeholder:'Finance',goals:['Cut claim handling cost'],effort:2,depends:['REQ-02']},
+ {id:'REQ-14',title:'Personalised renewal offers',description:'Offer pricing and cover tailored to claim and usage history.',type:'Business',priority:'Could',status:'Draft',stakeholder:'',goals:[],effort:8,depends:['REQ-02']}
+];
+const S={reqs:[],tab:'board',sel:null,editing:null,q:'',ftype:'',fstatus:''};
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const KEY='req-visualiser-v1';
+function save(){try{localStorage.setItem(KEY,JSON.stringify(S.reqs))}catch(e){}}
+function init(){
+  let d=null;try{d=JSON.parse(localStorage.getItem(KEY))}catch(e){}
+  S.reqs=Array.isArray(d)&&d.length?d.map(norm):JSON.parse(JSON.stringify(SAMPLE));
+}
+function norm(r,i){
+  const list=v=>Array.isArray(v)?v.map(x=>String(x).trim()).filter(Boolean):String(v||'').split(',').map(x=>x.trim()).filter(Boolean);
+  const pri=String(r.priority||'Should').replace(/[^A-Za-z]/g,'');
+  return {id:String(r.id||'REQ-'+String(i+1).padStart(2,'0')),title:String(r.title||'Untitled requirement'),description:String(r.description||''),
+    type:TYPES.includes(r.type)?r.type:'Functional',priority:PRI.find(p=>p.toLowerCase()===pri.toLowerCase())||'Should',
+    status:STATUS.includes(r.status)?r.status:'Draft',stakeholder:String(r.stakeholder||''),goals:list(r.goals),
+    effort:Math.max(0,Number(r.effort)||0),depends:list(r.depends)};
+}
+const byId=()=>Object.fromEntries(S.reqs.map(r=>[r.id,r]));
+const visible=()=>{const q=S.q.toLowerCase();return S.reqs.filter(r=>(!S.ftype||r.type===S.ftype)&&(!S.fstatus||r.status===S.fstatus)&&
+  (!q||(r.id+' '+r.title+' '+r.description+' '+r.stakeholder+' '+r.goals.join(' ')).toLowerCase().includes(q)))};
+
+/* analysis */
+function cycles(){
+  const m=byId(),state={},out=new Set();
+  const dfs=(id,path)=>{state[id]=1;for(const d of (m[id]?.depends||[])){if(!m[d])continue;
+    if(state[d]===1){path.slice(path.indexOf(d)).forEach(x=>out.add(x));out.add(d)}else if(!state[d])dfs(d,[...path,d])}state[id]=2};
+  S.reqs.forEach(r=>{if(!state[r.id])dfs(r.id,[r.id])});return out;
+}
+function flags(){
+  const f=[],m=byId(),rank={Must:0,Should:1,Could:2,Wont:3};
+  S.reqs.forEach(r=>{
+    if(!r.goals.length)f.push({id:r.id,sev:'warn',t:'No business goal linked'});
+    if(!r.stakeholder)f.push({id:r.id,sev:'warn',t:'No stakeholder named'});
+    if(r.priority==='Must'&&r.status==='Draft')f.push({id:r.id,sev:'warn',t:'Must have still in Draft'});
+    r.depends.forEach(d=>{const x=m[d];if(!x)f.push({id:r.id,sev:'bad',t:'Depends on missing '+d});
+      else if(rank[x.priority]>rank[r.priority])f.push({id:r.id,sev:'bad',t:`${PLABEL[r.priority]} depends on ${x.priority==='Wont'?'Won’t':x.priority} ${d}`})});
+  });
+  cycles().forEach(id=>f.push({id,sev:'bad',t:'Part of a dependency loop'}));
+  const gs={};S.reqs.forEach(r=>r.goals.forEach(g=>(gs[g]??=[]).push(r)));
+  Object.entries(gs).forEach(([g,rs])=>{if(!rs.some(r=>r.priority==='Must'||r.priority==='Should'))f.push({id:rs[0].id,sev:'warn',t:`Goal “${g}” has no Must or Should requirement`})});
+  return f;
+}
+
+/* chrome */
+function renderChrome(){
+  const tot=S.reqs.reduce((a,r)=>a+r.effort,0)||1;
+  const eff=Object.fromEntries(PRI.map(p=>[p,S.reqs.filter(r=>r.priority===p).reduce((a,r)=>a+r.effort,0)]));
+  const goals=new Set(S.reqs.flatMap(r=>r.goals));
+  $('stats').innerHTML=[[S.reqs.length,'Requirements'],[goals.size,'Goals'],[S.reqs.reduce((a,r)=>a+r.effort,0),'Effort points'],
+    [Math.round(100*eff.Must/tot)+'%','Effort in Must']].map(([v,l])=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
+  $('bar').innerHTML=PRI.map(p=>`<i style="width:${100*eff[p]/tot}%;background:var(--${p.toLowerCase()})" title="${PLABEL[p]}: ${eff[p]} pts"></i>`).join('');
+  $('legend').innerHTML=PRI.map(p=>`<span><span class="dot" style="background:var(--${p.toLowerCase()})"></span>${PLABEL[p]} ${eff[p]} pts</span>`).join('');
+  const fl=flags();
+  $('flags').innerHTML=fl.length?fl.slice(0,12).map((x,i)=>`<button class="flag ${x.sev}" data-id="${esc(x.id)}"><small>${esc(x.id)}</small>${esc(x.t)}</button>`).join('')+(fl.length>12?`<span class="msg" style="align-self:center">+${fl.length-12} more</span>`:''):'<span class="msg">No gaps or conflicts found.</span>';
+  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['table','Table']]
+    .map(([k,l])=>`<button class="tab" role="tab" data-tab="${k}" aria-selected="${S.tab===k}">${l}</button>`).join('');
+  $('ftype').innerHTML='<option value="">All types</option>'+TYPES.map(t=>`<option ${S.ftype===t?'selected':''}>${t}</option>`).join('');
+  $('fstatus').innerHTML='<option value="">All statuses</option>'+STATUS.map(t=>`<option ${S.fstatus===t?'selected':''}>${t}</option>`).join('');
+  $('json').value=JSON.stringify(S.reqs,null,1);
+}
+
+/* views */
+const pill=p=>`<span class="pill p-${p}">${p==='Wont'?'Won’t':p}</span>`;
+function boardView(rs){
+  return `<div class="board">${PRI.map(p=>{const items=rs.filter(r=>r.priority===p);
+    return `<div class="col ${p}"><h3>${PLABEL[p]}<span>${items.length} · ${items.reduce((a,r)=>a+r.effort,0)} pts</span></h3><div class="cards">${
+      items.map(r=>`<button class="card ${S.sel===r.id?'sel':''}" data-open="${esc(r.id)}"><span class="mono">${esc(r.id)} · ${esc(r.type)}</span><span class="t">${esc(r.title)}</span>
+      <span class="meta"><span>${esc(r.status)}</span><span>${r.effort} pts</span>${r.stakeholder?`<span>${esc(r.stakeholder)}</span>`:'<span style="color:var(--warn)">No stakeholder</span>'}</span></button>`).join('')||'<div class="empty">Nothing here</div>'}</div></div>`}).join('')}</div>`;
+}
+function tableView(rs){
+  if(!rs.length)return '<div class="empty">No requirements match the filters.</div>';
+  return `<table><thead><tr><th>ID</th><th>Requirement</th><th>Type</th><th>Priority</th><th>Status</th><th>Stakeholder</th><th class="num">Pts</th></tr></thead><tbody>${
+    rs.map(r=>`<tr class="${S.sel===r.id?'sel':''}" data-open="${esc(r.id)}"><td class="mono">${esc(r.id)}</td><td>${esc(r.title)}</td><td>${esc(r.type)}</td><td>${pill(r.priority)}</td><td>${esc(r.status)}</td><td>${esc(r.stakeholder)||'<span class="msg">None</span>'}</td><td class="num">${r.effort}</td></tr>`).join('')}</tbody></table>`;
+}
+function matrixView(rs){
+  const goals=[...new Set(S.reqs.flatMap(r=>r.goals))].sort();
+  if(!goals.length)return '<div class="empty">Link requirements to business goals to see traceability.</div>';
+  const rows=[...rs].sort((a,b)=>PRI.indexOf(a.priority)-PRI.indexOf(b.priority)||a.id.localeCompare(b.id));
+  const cov=g=>{const l=S.reqs.filter(r=>r.goals.includes(g));return {n:l.length,must:l.filter(r=>r.priority==='Must').length}};
+  return `<p class="hint">Each dot is a requirement that serves a goal, coloured by priority. Hatched cells in the Must row at the bottom mark goals with no Must requirement.</p>
+  <table class="matrix"><thead><tr><th>Requirement</th><th>Pri.</th>${goals.map(g=>`<th class="g"><span>${esc(g)}</span></th>`).join('')}</tr></thead><tbody>${
+   rows.map(r=>`<tr class="${S.sel===r.id?'sel':''}" data-open="${esc(r.id)}"><td><span class="mono">${esc(r.id)}</span> ${esc(r.title)}</td><td>${pill(r.priority)}</td>${
+     goals.map(g=>`<td class="c">${r.goals.includes(g)?`<i style="background:var(--${r.priority.toLowerCase()})" title="${esc(g)}"></i>`:''}</td>`).join('')}</tr>`).join('')}</tbody>
+   <tfoot><tr><td>Requirements per goal</td><td></td>${goals.map(g=>`<td class="c">${cov(g).n}</td>`).join('')}</tr>
+   <tr><td>Must requirements per goal</td><td></td>${goals.map(g=>`<td class="c ${cov(g).must?'':'gap'}">${cov(g).must}</td>`).join('')}</tr></tfoot></table>`;
+}
+function graphView(rs){
+  if(!rs.length)return '<div class="empty">No requirements match the filters.</div>';
+  const m=Object.fromEntries(rs.map(r=>[r.id,r])),memo={};
+  const depth=(id,seen=new Set())=>{if(memo[id]!=null)return memo[id];if(seen.has(id))return 0;seen.add(id);
+    const ds=(m[id].depends||[]).filter(d=>m[d]);const v=ds.length?1+Math.max(...ds.map(d=>depth(d,seen))):0;seen.delete(id);return memo[id]=v};
+  rs.forEach(r=>depth(r.id));
+  const layers=[];rs.forEach(r=>(layers[memo[r.id]]??=[]).push(r));
+  layers.forEach(l=>l&&l.sort((a,b)=>PRI.indexOf(a.priority)-PRI.indexOf(b.priority)||a.id.localeCompare(b.id)));
+  const W=200,H=54,GX=70,GY=16,pad=14,top=26,pos={};
+  const nL=layers.length;let maxN=0;
+  layers.forEach((l,i)=>{(l||[]).forEach((r,j)=>pos[r.id]={x:pad+i*(W+GX),y:top+j*(H+GY)});maxN=Math.max(maxN,(l||[]).length)});
+  const w=pad*2+nL*W+(nL-1)*GX,h=top+maxN*(H+GY)+pad;
+  // related set for selection
+  let rel=null;
+  if(S.sel&&m[S.sel]){rel=new Set([S.sel]);const up=id=>(m[id].depends||[]).forEach(d=>{if(m[d]&&!rel.has(d)){rel.add(d);up(d)}});up(S.sel);
+    const down=id=>rs.forEach(r=>{if(r.depends.includes(id)&&!rel.has(r.id)){rel.add(r.id);down(r.id)}});down(S.sel)}
+  let edges='';
+  rs.forEach(r=>(r.depends||[]).forEach(d=>{if(!m[d])return;const a=pos[d],b=pos[r.id];
+    const x1=a.x+W,y1=a.y+H/2,x2=b.x,y2=b.y+H/2,c=Math.max(24,(x2-x1)/2);
+    const on=rel&&rel.has(d)&&rel.has(r.id);
+    edges+=`<path class="gedge ${on?'hi':''} ${rel&&!on?'dim':''}" d="M${x1},${y1} C${x1+c},${y1} ${x2-c},${y2} ${x2},${y2}"/>`;}));
+  const trunc=(s,n)=>s.length>n?s.slice(0,n-1)+'…':s;
+  const nodes=rs.map(r=>{const p=pos[r.id];return `<g class="gnode ${S.sel===r.id?'sel':''} ${rel&&!rel.has(r.id)?'dim':''}" data-open="${esc(r.id)}" transform="translate(${p.x},${p.y})">
+    <title>${esc(r.id)} ${esc(r.title)} (${r.priority}, ${r.effort} pts)</title><rect width="${W}" height="${H}" rx="3"/>
+    <rect width="5" height="${H}" fill="var(--${r.priority.toLowerCase()})" stroke="none"/>
+    <text class="id" x="14" y="19">${esc(r.id)} · ${r.effort} pts</text><text class="tt" x="14" y="38">${esc(trunc(r.title,28))}</text></g>`}).join('');
+  const heads=layers.map((l,i)=>`<text class="gtip" x="${pad+i*(W+GX)}" y="14">${i===0?'No dependencies':'Needs level '+i}</text>`).join('');
+  return `<p class="hint">Arrows run from what must exist first to what needs it. Select a requirement to trace everything upstream and downstream of it.</p>
+  <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="Requirement dependency map">${heads}${edges}${nodes}</svg>`;
+}
+function renderView(){
+  const rs=visible();
+  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView})[S.tab](rs);
+}
+
+/* editor */
+function renderEditor(){
+  const w=$('editorWrap'),work=$('work');
+  if(!S.editing){w.hidden=true;work.classList.add('noedit');return}
+  work.classList.remove('noedit');w.hidden=false;
+  const r=S.editing.draft;const isNew=S.editing.isNew;
+  const opt=(arr,v)=>arr.map(x=>`<option ${x===v?'selected':''}>${x}</option>`).join('');
+  w.innerHTML=`<form class="editor" id="form" autocomplete="off">
+   <h2>${isNew?'New requirement':esc(r.id)}<button type="button" class="btn" id="close" aria-label="Close editor">Close</button></h2>
+   <label><span>Title</span><input type="text" id="f-title" value="${esc(r.title)}" required></label>
+   <label><span>Description</span><textarea id="f-desc">${esc(r.description)}</textarea></label>
+   <div class="row2"><label><span>Priority (MoSCoW)</span><select id="f-pri">${PRI.map(p=>`<option value="${p}" ${p===r.priority?'selected':''}>${PLABEL[p]}</option>`).join('')}</select></label>
+   <label><span>Type</span><select id="f-type">${opt(TYPES,r.type)}</select></label></div>
+   <div class="row2"><label><span>Status</span><select id="f-status">${opt(STATUS,r.status)}</select></label>
+   <label><span>Effort (points)</span><input type="number" id="f-effort" min="0" step="1" value="${r.effort}"></label></div>
+   <label><span>Stakeholder</span><input type="text" id="f-stake" value="${esc(r.stakeholder)}"></label>
+   <label><span>Business goals (comma separated)</span><input type="text" id="f-goals" value="${esc(r.goals.join(', '))}" list="goalList"></label>
+   <datalist id="goalList">${[...new Set(S.reqs.flatMap(x=>x.goals))].map(g=>`<option value="${esc(g)}">`).join('')}</datalist>
+   <div><span class="msg">Depends on</span><div class="deps">${S.reqs.filter(x=>x.id!==r.id).map(x=>`<label><input type="checkbox" class="f-dep" value="${esc(x.id)}" ${r.depends.includes(x.id)?'checked':''}><span class="mono">${esc(x.id)}</span> ${esc(x.title)}</label>`).join('')||'<span class="msg">No other requirements yet.</span>'}</div></div>
+   <div class="actions"><button class="btn primary" type="submit">${isNew?'Add requirement':'Save changes'}</button>${isNew?'':'<button type="button" class="btn danger" id="del">Delete</button>'}</div>
+   <span class="msg" id="delMsg" role="status"></span></form>`;
+}
+function openEditor(id){
+  const r=S.reqs.find(x=>x.id===id);if(!r)return;
+  S.sel=id;S.editing={isNew:false,draft:JSON.parse(JSON.stringify(r)),orig:id};renderAll();
+}
+function newReq(){
+  let n=S.reqs.length+1;while(S.reqs.some(r=>r.id==='REQ-'+String(n).padStart(2,'0')))n++;
+  S.editing={isNew:true,orig:null,draft:{id:'REQ-'+String(n).padStart(2,'0'),title:'',description:'',type:'Functional',priority:'Should',status:'Draft',stakeholder:'',goals:[],effort:3,depends:[]}};
+  renderAll();$('f-title')?.focus();
+}
+function commit(){
+  const d=S.editing.draft;
+  d.title=$('f-title').value.trim()||'Untitled requirement';d.description=$('f-desc').value.trim();
+  d.priority=$('f-pri').value;d.type=$('f-type').value;d.status=$('f-status').value;d.effort=Math.max(0,Number($('f-effort').value)||0);
+  d.stakeholder=$('f-stake').value.trim();d.goals=$('f-goals').value.split(',').map(s=>s.trim()).filter(Boolean);
+  d.depends=[...document.querySelectorAll('.f-dep:checked')].map(c=>c.value);
+  if(S.editing.isNew)S.reqs.push(d);else S.reqs[S.reqs.findIndex(r=>r.id===S.editing.orig)]=d;
+  S.sel=d.id;S.editing=null;save();renderAll();
+}
+function renderAll(){renderChrome();renderView();renderEditor()}
+
+/* events */
+document.addEventListener('click',e=>{
+  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset');if(!t)return;
+  if(t.dataset.tab){S.tab=t.dataset.tab;renderAll()}
+  else if(t.dataset.open)openEditor(t.dataset.open);
+  else if(t.dataset.id)openEditor(t.dataset.id);
+  else if(t.id==='add')newReq();
+  else if(t.id==='close'){S.editing=null;renderAll()}
+  else if(t.id==='del'){
+    if(t.dataset.arm!=='1'){t.dataset.arm='1';t.textContent='Click again to delete';return}
+    const id=S.editing.orig;S.reqs=S.reqs.filter(r=>r.id!==id);S.reqs.forEach(r=>r.depends=r.depends.filter(d=>d!==id));
+    S.editing=null;S.sel=null;save();renderAll()}
+  else if(t.id==='copy'){const v=$('json').value;const done=()=>$('ioMsg').textContent='Copied to clipboard.';
+    (navigator.clipboard?.writeText(v).then(done,()=>{$('json').select();$('ioMsg').textContent='Select and copy the text above.'}))||($('json').select(),$('ioMsg').textContent='Select and copy the text above.')}
+  else if(t.id==='load'){try{const d=JSON.parse($('json').value);if(!Array.isArray(d)||!d.length)throw 0;
+    S.reqs=d.map(norm);S.editing=null;S.sel=null;save();renderAll();$('ioMsg').textContent=`Loaded ${S.reqs.length} requirements.`}catch(_){$('ioMsg').textContent='That is not a JSON list of requirements. Check the brackets and commas.'}}
+  else if(t.id==='reset'){S.reqs=JSON.parse(JSON.stringify(SAMPLE));S.editing=null;S.sel=null;save();renderAll();$('ioMsg').textContent='Sample restored.'}
+});
+document.addEventListener('submit',e=>{if(e.target.id==='form'){e.preventDefault();commit()}});
+$('q').addEventListener('input',e=>{S.q=e.target.value;renderView()});
+$('ftype').addEventListener('change',e=>{S.ftype=e.target.value;renderView()});
+$('fstatus').addEventListener('change',e=>{S.fstatus=e.target.value;renderView()});
+init();renderAll();
+</script>
