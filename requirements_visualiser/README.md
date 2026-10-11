@@ -6,6 +6,7 @@ A single-page tool for keeping business requirements in one place and seeing the
 
 - **Views:** priority board (MoSCoW), dependency map, goal traceability, acceptance criteria, test coverage, delivery pipeline, table.
 - **Checks:** flags missing goals, criteria or tests, failing builds, priority conflicts and dependency loops as you edit.
+- **Whiteboard:** a Microsoft Whiteboard-style canvas with sticky notes, text, shapes, arrows and a pen. One click lays out your requirements as notes by priority. Copy the board as an image and paste it into Microsoft Whiteboard.
 - **Weekly report:** a formatted PM update with a Red/Amber/Green status. Copy it for email or as Markdown.
 - **Trackers:** link work items from an Azure DevOps or Jira export, and export requirements back out as CSV or a GitHub checklist.
 

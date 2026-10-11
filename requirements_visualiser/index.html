@@ -142,6 +142,16 @@ h4{font:600 14px var(--font-display);margin:4px 0 8px}
 .ac-row{display:grid;grid-template-columns:auto 1fr auto;gap:6px;align-items:center;padding:4px 0}
 .ac td.crit{max-width:60ch}
 .ac tr.first td{border-top:2px solid var(--line)}
+.wb-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+.wb-bar .btn[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.wb-bar .btn:disabled{opacity:.45;cursor:default}
+.wb-bar .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+.sw{width:22px;height:22px;border:2px solid var(--line);border-radius:50%;padding:0}
+.sw[aria-pressed="true"]{border-color:var(--fg);box-shadow:0 0 0 2px var(--surface),0 0 0 3px var(--fg)}
+#wbWrap{position:relative;border:1px solid var(--line);background:#ffffff;overflow:hidden;touch-action:none}
+#wbSvg{display:block;width:100%;touch-action:none;user-select:none}
+#wbEdit{position:absolute;z-index:3;border:2px solid #0f6cbd;background:#fffbe0;color:#1b1b1b;resize:none;padding:8px;font-family:'Segoe UI',Arial,sans-serif;border-radius:2px}
+#wbPreview img{max-width:100%;border:1px solid var(--line);margin-top:8px;background:#fff}
 .rp-ctl{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:10px;margin-bottom:14px}
 .rp-ctl label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted);font-weight:500}
 .rp-ctl label>*{color:var(--fg);font-size:14px;font-weight:400}
@@ -356,7 +366,7 @@ function renderChrome(){
   $('legend').innerHTML=PRI.map(p=>`<span><span class="dot" style="background:var(--${p.toLowerCase()})"></span>${PLABEL[p]} ${eff[p]} pts</span>`).join('');
   const fl=flags();
   $('flags').innerHTML=fl.length?fl.slice(0,12).map((x,i)=>`<button class="flag ${x.sev}" data-id="${esc(x.id)}"><small>${esc(x.id)}</small>${esc(x.t)}</button>`).join('')+(fl.length>12?`<span class="msg" style="align-self:center">+${fl.length-12} more</span>`:''):'<span class="msg">No gaps or conflicts found.</span>';
-  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['criteria','Acceptance'],['tests','Tests'],['delivery','Delivery'],['report','Weekly report'],['table','Table']]
+  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['criteria','Acceptance'],['tests','Tests'],['delivery','Delivery'],['whiteboard','Whiteboard'],['report','Weekly report'],['table','Table']]
     .map(([k,l])=>`<button class="tab" role="tab" data-tab="${k}" aria-selected="${S.tab===k}">${l}</button>`).join('');
   $('ftype').innerHTML='<option value="">All types</option>'+TYPES.map(t=>`<option ${S.ftype===t?'selected':''}>${t}</option>`).join('');
   $('fstatus').innerHTML='<option value="">All statuses</option>'+STATUS.map(t=>`<option ${S.fstatus===t?'selected':''}>${t}</option>`).join('');
@@ -594,10 +604,272 @@ function saveSnap(){
   catch(e){$('rpMsg').textContent='This browser blocked saving the snapshot.'}
   $('sheet').innerHTML=reportHTML(reportModel());
 }
+
+/* whiteboard */
+const WBK='req-visualiser-board';
+const WC={yellow:'#fff3a3',pink:'#ffc2d9',green:'#c9efc0',blue:'#bfe0ff',orange:'#ffd3a1',purple:'#dccbff',gray:'#e3e6ea'};
+const WPEN={black:'#1b1b1b',red:'#d13438',blue:'#0f6cbd',green:'#107c10'};
+const WFONT='Segoe UI, Arial, sans-serif',LH=19;
+const B={items:[],vx:30,vy:20,z:1,tool:'select',color:'yellow',pen:'black',sel:null,hist:[],drag:null,draft:null,editing:null,moved:false,clearArm:false};
+const wid=()=>'w'+Math.random().toString(36).slice(2,9);
+const get=id=>B.items.find(i=>i.id===id);
+const isBox=i=>i&&(i.t==='note'||i.t==='text'||i.t==='rect'||i.t==='ellipse');
+const saveBoard=()=>{try{localStorage.setItem(WBK,JSON.stringify(B.items))}catch(e){}};
+function snap(){B.hist.push(JSON.stringify(B.items));if(B.hist.length>60)B.hist.shift()}
+function initBoard(){
+  let raw=null;try{raw=localStorage.getItem(WBK)}catch(e){}
+  if(raw==null){layoutReqs();B.hist=[];return}
+  try{const d=JSON.parse(raw);if(Array.isArray(d))B.items=d}catch(e){}
+}
+const _cv=document.createElement('canvas').getContext('2d');
+function wrap(text,maxW,size,bold){
+  _cv.font=`${bold?'600 ':''}${size}px "Segoe UI",Arial,sans-serif`;
+  const m=t=>_cv.measureText(t).width,out=[];
+  String(text||'').split('\n').forEach(par=>{
+    let line='';
+    par.split(/\s+/).filter(Boolean).forEach(w=>{
+      while(m(w)>maxW&&w.length>1){let n=w.length;while(n>1&&m(w.slice(0,n))>maxW)n--;if(line){out.push(line);line=''}out.push(w.slice(0,n));w=w.slice(n)}
+      const t=line?line+' '+w:w;if(m(t)>maxW&&line){out.push(line);line=w}else line=t});
+    out.push(line)});
+  return out;
+}
+function textSVG(it,size,center,bold,fill){
+  const pad=10;let lines=wrap(it.text,it.w-pad*2,size,bold);
+  if(it.t==='text')it.h=Math.max(30,lines.length*LH+14);
+  const max=Math.max(1,Math.floor((it.h-pad*2+4)/LH));
+  if(lines.length>max){lines=lines.slice(0,max);lines[max-1]=lines[max-1].replace(/\s*\S?$/,'')+'…'}
+  if(!it.text)return '';
+  const th=lines.length*LH,y0=center?it.y+(it.h-th)/2+LH*0.78:it.y+pad+LH*0.78;
+  const x=center?it.x+it.w/2:it.x+pad;
+  return `<text x="${x}" y="${y0}" font-size="${size}" fill="${fill}" ${bold?'font-weight="600"':''} ${center?'text-anchor="middle"':''}>${lines.map((l,i)=>`<tspan x="${x}" dy="${i?LH:0}">${esc(l)}</tspan>`).join('')}</text>`;
+}
+const center=i=>({x:i.x+i.w/2,y:i.y+i.h/2});
+function borderPoint(i,tx,ty){
+  const c=center(i),dx=tx-c.x,dy=ty-c.y;if(!dx&&!dy)return c;
+  const hw=i.w/2,hh=i.h/2;
+  const s=i.t==='ellipse'?1/Math.sqrt((dx/hw)**2+(dy/hh)**2):Math.min(hw/Math.abs(dx||1e-9),hh/Math.abs(dy||1e-9));
+  return {x:c.x+dx*s,y:c.y+dy*s};
+}
+function arrowGeom(a,b){
+  const ia=a.id&&get(a.id),ib=b.id&&get(b.id);
+  if((a.id&&!ia)||(b.id&&!ib))return null;
+  const ra=ia?center(ia):a,rb=ib?center(ib):b;
+  return {p:ia?borderPoint(ia,rb.x,rb.y):{x:a.x,y:a.y},q:ib?borderPoint(ib,ra.x,ra.y):{x:b.x,y:b.y}};
+}
+function arrowSVG(a,b,id,dim){
+  const g=arrowGeom(a,b);if(!g)return '';
+  const {p,q}=g,ang=Math.atan2(q.y-p.y,q.x-p.x),L=12;
+  const h=[[q.x,q.y],[q.x-L*Math.cos(ang-.45),q.y-L*Math.sin(ang-.45)],[q.x-L*Math.cos(ang+.45),q.y-L*Math.sin(ang+.45)]].map(v=>v.join(',')).join(' ');
+  const col=dim?'#8a8f98':'#3b3f46';
+  return `<g ${id?`data-id="${id}"`:'pointer-events="none"'}><line x1="${p.x}" y1="${p.y}" x2="${q.x}" y2="${q.y}" stroke="transparent" stroke-width="14"/><line x1="${p.x}" y1="${p.y}" x2="${q.x}" y2="${q.y}" stroke="${col}" stroke-width="2"/><polygon points="${h}" fill="${col}"/></g>`;
+}
+function itemSVG(i){
+  if(i.t==='note')return `<g data-id="${i.id}"><rect x="${i.x+3}" y="${i.y+4}" width="${i.w}" height="${i.h}" fill="#000" fill-opacity=".12"/><rect x="${i.x}" y="${i.y}" width="${i.w}" height="${i.h}" fill="${WC[i.color]||WC.yellow}"/>${textSVG(i,15,false,false,'#1b1b1b')}</g>`;
+  if(i.t==='text'){const t=textSVG(i,i.b?18:16,false,!!i.b,'#1b1b1b');return `<g data-id="${i.id}"><rect x="${i.x}" y="${i.y}" width="${i.w}" height="${i.h}" fill="#fff" fill-opacity="0"/>${t}</g>`}
+  if(i.t==='rect')return `<g data-id="${i.id}"><rect x="${i.x}" y="${i.y}" width="${i.w}" height="${i.h}" rx="6" fill="${WC[i.color]||WC.blue}" stroke="#6b7280" stroke-width="1.5"/>${textSVG(i,15,true,false,'#1b1b1b')}</g>`;
+  if(i.t==='ellipse')return `<g data-id="${i.id}"><ellipse cx="${i.x+i.w/2}" cy="${i.y+i.h/2}" rx="${i.w/2}" ry="${i.h/2}" fill="${WC[i.color]||WC.blue}" stroke="#6b7280" stroke-width="1.5"/>${textSVG(i,15,true,false,'#1b1b1b')}</g>`;
+  if(i.t==='arrow')return arrowSVG(i.a,i.b,i.id,!!i.dep);
+  if(i.t==='pen'){const d=i.pts.map(q=>q.join(',')).join(' ');return `<g data-id="${i.id}"><polyline points="${d}" fill="none" stroke="transparent" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/><polyline points="${d}" fill="none" stroke="${WPEN[i.color]||WPEN.black}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></g>`}
+  return '';
+}
+function bbox(i){
+  if(isBox(i)){if(i.t==='text')textSVG(i,16,false,false,'');return {x:i.x,y:i.y,w:i.w,h:i.h}}
+  if(i.t==='pen'){const xs=i.pts.map(q=>q[0]),ys=i.pts.map(q=>q[1]);return {x:Math.min(...xs),y:Math.min(...ys),w:Math.max(...xs)-Math.min(...xs),h:Math.max(...ys)-Math.min(...ys)}}
+  const g=arrowGeom(i.a,i.b);if(!g)return null;
+  return {x:Math.min(g.p.x,g.q.x),y:Math.min(g.p.y,g.q.y),w:Math.abs(g.p.x-g.q.x),h:Math.abs(g.p.y-g.q.y)};
+}
+const wbOrder=()=>[...B.items.filter(i=>i.dep),...B.items.filter(i=>!i.dep)];   // dependency arrows sit under the notes
+function wbDraw(){
+  const w=$('wbWorld');if(!w)return;
+  const tf=`translate(${B.vx},${B.vy}) scale(${B.z})`;
+  w.setAttribute('transform',tf);$('wbDots').setAttribute('patternTransform',tf);
+  let h=wbOrder().map(itemSVG).join('');
+  const d=B.draft;
+  if(d&&d.k==='pen')h+=`<polyline pointer-events="none" points="${d.pts.map(q=>q.join(',')).join(' ')}" fill="none" stroke="${WPEN[B.pen]}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;
+  if(d&&d.k==='arrow')h+=arrowSVG(d.a,d.b,null,false);
+  const s=get(B.sel),bb=s&&bbox(s);
+  if(bb){const k=1/B.z;h+=`<rect pointer-events="none" x="${bb.x-4}" y="${bb.y-4}" width="${bb.w+8}" height="${bb.h+8}" fill="none" stroke="#0f6cbd" stroke-width="${1.5*k}" stroke-dasharray="${5*k} ${4*k}"/>`;
+    if(isBox(s))h+=`<rect data-handle="1" x="${bb.x+bb.w-4*k}" y="${bb.y+bb.h-4*k}" width="${10*k}" height="${10*k}" fill="#fff" stroke="#0f6cbd" stroke-width="${1.5*k}" style="cursor:nwse-resize"/>`}
+  w.innerHTML=h;
+}
+function wbSync(){
+  const bar=$('wbBar');if(!bar)return;
+  const tools=[['select','Select'],['pen','Pen'],['note','Note'],['text','Text'],['rect','Box'],['ellipse','Oval'],['arrow','Arrow']];
+  const s=get(B.sel),sw=B.tool==='pen'?Object.entries(WPEN).map(([k,v])=>[k,v,'pen',B.pen===k]):Object.entries(WC).map(([k,v])=>[k,v,'color',(s&&s.color?s.color:B.color)===k]);
+  bar.innerHTML=tools.map(([k,l])=>`<button class="btn" data-wb="tool:${k}" aria-pressed="${B.tool===k}">${l}</button>`).join('')+'<span class="sep"></span>'+
+    sw.map(([k,v,m,on])=>`<button class="sw" data-wb="${m}:${k}" style="background:${v}" aria-label="${k}" aria-pressed="${on}"></button>`).join('')+'<span class="sep"></span>'+
+    `<button class="btn" data-wb="act:undo" ${B.hist.length?'':'disabled'}>Undo</button><button class="btn" data-wb="act:del" ${s?'':'disabled'}>Delete</button>`+
+    `<span class="sep"></span><button class="btn" data-wb="act:zout" aria-label="Zoom out">−</button><span class="msg" style="min-width:38px;text-align:center">${Math.round(B.z*100)}%</span><button class="btn" data-wb="act:zin" aria-label="Zoom in">+</button><button class="btn" data-wb="act:fit">Fit</button>`+
+    `<span class="sep"></span><button class="btn" data-wb="act:reqs">Add requirements as notes</button>`+(s&&s.req?`<button class="btn" data-wb="act:open">Open ${esc(s.req)}</button>`:'')+
+    `<button class="btn danger" data-wb="act:clear">${B.clearArm?'Click again to clear':'Clear board'}</button>`;
+  const svg=$('wbSvg');if(svg)svg.style.cursor=B.tool==='select'?'default':B.tool==='pen'?'crosshair':'copy';
+}
+function whiteboardView(){
+  return `<div class="wb-bar" id="wbBar"></div>
+  <div id="wbWrap"><svg id="wbSvg" role="img" aria-label="Whiteboard canvas"><defs><pattern id="wbDots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.2" fill="#c3c9d2"/></pattern></defs>
+   <rect width="100%" height="100%" fill="#ffffff"/><rect width="100%" height="100%" fill="url(#wbDots)"/><g id="wbWorld"></g></svg></div>
+  <p class="hint" style="margin-top:8px">Pick a tool and click the board to place a note, text, box or oval. Double-click anything to edit its text. Drag the background to pan, scroll to zoom, press Delete to remove the selection and Ctrl+Z to undo. Pen and arrow drag on the board; arrows that start or end on a shape stay attached.</p>
+  <div class="actions"><button class="btn primary" data-wb="act:png">Copy as image for Whiteboard</button><button class="btn" data-wb="act:svg">Copy as SVG</button><button class="btn" data-wb="act:notes">Copy note text</button><button class="btn" data-wb="act:json">Show board data</button><span class="msg" id="wbMsg" role="status"></span></div>
+  <p class="msg" style="margin:6px 0 0">Microsoft Whiteboard has no file import. Copy as image, open your whiteboard and press Ctrl+V to paste the board as a picture.</p>
+  <div id="wbPreview"></div>
+  <div id="wbData" hidden><textarea id="wbJson" aria-label="Board data" spellcheck="false" style="width:100%;min-height:120px;margin-top:8px;font-family:var(--font-mono);font-size:12px"></textarea><div class="actions" style="margin-top:6px"><button class="btn" data-wb="act:loadjson">Load board data</button></div></div>`;
+}
+function wbMount(){
+  const svg=$('wbSvg');if(!svg)return;
+  svg.style.height='min(70vh,620px)';
+  svg.addEventListener('pointerdown',wbDown);svg.addEventListener('pointermove',wbMove);
+  svg.addEventListener('pointerup',wbUp);svg.addEventListener('pointercancel',wbUp);
+  svg.addEventListener('dblclick',e=>{const h=e.target.closest('[data-id]');if(h&&isBox(get(h.dataset.id)))wbEdit(h.dataset.id)});
+  svg.addEventListener('wheel',e=>{e.preventDefault();const p=wbPt(e),nz=Math.min(3,Math.max(.2,B.z*(e.deltaY<0?1.1:1/1.1)));
+    B.vx=p.sx-(p.sx-B.vx)*(nz/B.z);B.vy=p.sy-(p.sy-B.vy)*(nz/B.z);B.z=nz;wbDraw();wbSync()},{passive:false});
+  wbSync();wbDraw();
+}
+function wbPt(e){const r=$('wbSvg').getBoundingClientRect(),sx=e.clientX-r.left,sy=e.clientY-r.top;return {sx,sy,x:(sx-B.vx)/B.z,y:(sy-B.vy)/B.z}}
+function wbEnd(p,el){const it=el&&get(el.dataset.id);return isBox(it)?{id:it.id}:{x:p.x,y:p.y}}
+function wbNew(t,p){
+  const id=wid();
+  if(t==='note')return {id,t,x:p.x-100,y:p.y-65,w:200,h:130,text:'',color:B.color};
+  if(t==='text')return {id,t,x:p.x-110,y:p.y-15,w:220,h:30,text:''};
+  return {id,t,x:p.x-90,y:p.y-55,w:180,h:110,text:'',color:B.color==='yellow'?'blue':B.color};
+}
+function wbDown(e){
+  if(B.editing){wbCommit();return}
+  const p=wbPt(e),h=e.target.closest&&e.target.closest('[data-id]');
+  $('wbSvg').setPointerCapture(e.pointerId);B.moved=false;
+  if(e.target.dataset&&e.target.dataset.handle){B.drag={k:'resize',id:B.sel};return}
+  const t=B.tool;
+  if(t==='select'){
+    if(h){B.sel=h.dataset.id;B.drag={k:'move',id:B.sel,px:p.x,py:p.y,orig:JSON.parse(JSON.stringify(get(B.sel)))}}
+    else{B.sel=null;B.drag={k:'pan',sx:p.sx,sy:p.sy,vx:B.vx,vy:B.vy}}
+    wbSync();
+  }else if(t==='pen')B.draft={k:'pen',pts:[[p.x,p.y]]};
+  else if(t==='arrow')B.draft={k:'arrow',a:wbEnd(p,h),b:{x:p.x,y:p.y}};
+  else{snap();const it=wbNew(t,p);B.items.push(it);B.sel=it.id;B.tool='select';saveBoard();wbSync();wbDraw();setTimeout(()=>wbEdit(it.id),30);return}   // after the browser's own mousedown focus change
+  wbDraw();
+}
+function wbMove(e){
+  const d=B.drag,dr=B.draft;if(!d&&!dr)return;
+  const p=wbPt(e);
+  if(dr){if(dr.k==='pen')dr.pts.push([Math.round(p.x*10)/10,Math.round(p.y*10)/10]);else dr.b={x:p.x,y:p.y};wbDraw();return}
+  if(d.k==='pan'){B.vx=d.vx+p.sx-d.sx;B.vy=d.vy+p.sy-d.sy}
+  else{
+    const it=get(d.id);if(!it)return;
+    if(d.k==='move'){
+      const dx=p.x-d.px,dy=p.y-d.py;if(!B.moved&&Math.hypot(dx,dy)*B.z<3)return;
+      if(!B.moved){snap();B.moved=true}
+      if(d.orig.pts)it.pts=d.orig.pts.map(q=>[q[0]+dx,q[1]+dy]);
+      else if(it.t==='arrow')['a','b'].forEach(k=>{if(d.orig[k].id===undefined)it[k]={x:d.orig[k].x+dx,y:d.orig[k].y+dy}});
+      else{it.x=d.orig.x+dx;it.y=d.orig.y+dy}
+    }else{
+      if(!B.moved){snap();B.moved=true}
+      it.w=Math.max(60,p.x-it.x);if(it.t!=='text')it.h=Math.max(40,p.y-it.y);
+    }
+  }
+  wbDraw();
+}
+function wbUp(e){
+  const dr=B.draft;
+  if(dr){
+    if(dr.k==='pen'&&dr.pts.length>=2){snap();B.items.push({id:wid(),t:'pen',pts:dr.pts,color:B.pen})}
+    if(dr.k==='arrow'){
+      const p=wbPt(e),el=document.elementsFromPoint(e.clientX,e.clientY).map(x=>x.closest&&x.closest('[data-id]')).find(Boolean);
+      const b=wbEnd(p,el),g=arrowGeom(dr.a,b);
+      if(g&&Math.hypot(g.q.x-g.p.x,g.q.y-g.p.y)>12&&!(dr.a.id&&dr.a.id===b.id)){snap();B.items.push({id:wid(),t:'arrow',a:dr.a,b})}
+    }
+  }
+  B.draft=null;B.drag=null;saveBoard();wbDraw();wbSync();
+}
+function wbEdit(id){
+  const it=get(id);if(!isBox(it))return;
+  B.editing=id;const ta=document.createElement('textarea');ta.id='wbEdit';ta.value=it.text||'';
+  const bb=bbox(it);
+  Object.assign(ta.style,{left:(bb.x*B.z+B.vx)+'px',top:(bb.y*B.z+B.vy)+'px',width:Math.max(90,bb.w*B.z)+'px',height:Math.max(44,bb.h*B.z)+'px',fontSize:Math.max(11,15*B.z)+'px'});
+  ta.addEventListener('keydown',ev=>{if(ev.key==='Escape'||(ev.key==='Enter'&&(ev.ctrlKey||ev.metaKey))){ev.preventDefault();wbCommit()}});
+  ta.addEventListener('blur',wbCommit);
+  $('wbWrap').appendChild(ta);ta.focus();ta.select();
+}
+function wbCommit(){
+  const ta=$('wbEdit');if(!ta||!B.editing)return;
+  const it=get(B.editing),v=ta.value;B.editing=null;ta.remove();
+  if(it){if(v!==(it.text||'')){snap();it.text=v}
+    if(it.t==='text'&&!it.text.trim())B.items=B.items.filter(x=>x!==it)}
+  saveBoard();wbDraw();wbSync();
+}
+function layoutReqs(){
+  snap();
+  const col={Must:0,Should:1,Could:2,Wont:3},cc={Must:'pink',Should:'yellow',Could:'green',Wont:'gray'},X=n=>40+n*230,rows=[0,0,0,0];
+  const have=new Map(B.items.filter(i=>i.req).map(i=>[i.req,i.id]));
+  PRI.forEach(p=>{if(!B.items.some(i=>i.hdr===p))B.items.push({id:wid(),t:'text',x:X(col[p]),y:20,w:200,h:30,text:PLABEL[p],b:1,hdr:p})});
+  S.reqs.forEach(r=>{if(have.has(r.id))rows[col[r.priority]]++});
+  S.reqs.forEach(r=>{if(have.has(r.id))return;const c=col[r.priority],id=wid();
+    B.items.push({id,t:'note',x:X(c),y:70+rows[c]*150,w:200,h:130,text:r.id+'\n'+r.title,color:cc[r.priority],req:r.id});have.set(r.id,id);rows[c]++});
+  S.reqs.forEach(r=>r.depends.forEach(d=>{const a=have.get(d),b=have.get(r.id);
+    if(a&&b&&!B.items.some(i=>i.t==='arrow'&&i.a.id===a&&i.b.id===b))B.items.push({id:wid(),t:'arrow',a:{id:a},b:{id:b},dep:1})}));
+  saveBoard();
+}
+function wbFit(){
+  const bbs=B.items.map(bbox).filter(Boolean),r=$('wbSvg')?.getBoundingClientRect();if(!bbs.length||!r)return;
+  const x0=Math.min(...bbs.map(b=>b.x)),y0=Math.min(...bbs.map(b=>b.y)),x1=Math.max(...bbs.map(b=>b.x+b.w)),y1=Math.max(...bbs.map(b=>b.y+b.h));
+  B.z=Math.min(1.5,Math.max(.2,Math.min((r.width-60)/(x1-x0),(r.height-60)/(y1-y0))));
+  B.vx=(r.width-(x1-x0)*B.z)/2-x0*B.z;B.vy=(r.height-(y1-y0)*B.z)/2-y0*B.z;
+}
+function boardSVG(){
+  const bbs=B.items.map(bbox).filter(Boolean);if(!bbs.length)return null;
+  const pad=40,x0=Math.min(...bbs.map(b=>b.x))-pad,y0=Math.min(...bbs.map(b=>b.y))-pad,x1=Math.max(...bbs.map(b=>b.x+b.w))+pad+4,y1=Math.max(...bbs.map(b=>b.y+b.h))+pad+4;
+  const w=Math.ceil(x1-x0),h=Math.ceil(y1-y0);
+  return {w,h,svg:`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="${x0} ${y0} ${w} ${h}" font-family="${WFONT}"><rect x="${x0}" y="${y0}" width="${w}" height="${h}" fill="#ffffff"/>${wbOrder().map(itemSVG).join('')}</svg>`};
+}
+async function wbPng(){
+  const b=boardSVG();if(!b)return null;
+  const img=new Image();await new Promise((res,rej)=>{img.onload=res;img.onerror=rej;img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(b.svg)});
+  const sc=Math.min(2,7000/Math.max(b.w,b.h)),c=document.createElement('canvas');c.width=Math.round(b.w*sc);c.height=Math.round(b.h*sc);
+  const g=c.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,c.width,c.height);g.drawImage(img,0,0,c.width,c.height);
+  return new Promise(r=>c.toBlob(r,'image/png'));
+}
+async function wbCopyText(t,okMsg){
+  const msg=$('wbMsg');
+  try{await navigator.clipboard.writeText(t);msg.textContent=okMsg;return}catch(e){}
+  const a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();let ok=false;try{ok=document.execCommand('copy')}catch(e){}a.remove();
+  msg.textContent=ok?okMsg:'Copy was blocked. Use Show board data and copy from the box.';
+}
+async function wbAction(s){
+  const [k,v]=s.split(':'),msg=$('wbMsg');
+  if(k!=='act'||v!=='clear')B.clearArm=false;
+  if(k==='tool'){if(B.editing)wbCommit();B.tool=v;if(v!=='select')B.sel=null}
+  else if(k==='pen')B.pen=v;
+  else if(k==='color'){const it=get(B.sel);if(it&&it.t!=='pen'&&it.t!=='arrow'&&it.t!=='text'){snap();it.color=v;saveBoard()}B.color=v}
+  else if(v==='undo'){const h=B.hist.pop();if(h!=null){B.items=JSON.parse(h);B.sel=null;saveBoard()}}
+  else if(v==='del'){if(B.sel){snap();const id=B.sel;B.items=B.items.filter(i=>i.id!==id&&!(i.t==='arrow'&&(i.a.id===id||i.b.id===id)));B.sel=null;saveBoard()}}
+  else if(v==='zin'||v==='zout'){const r=$('wbSvg').getBoundingClientRect(),nz=Math.min(3,Math.max(.2,B.z*(v==='zin'?1.2:1/1.2))),cx=r.width/2,cy=r.height/2;
+    B.vx=cx-(cx-B.vx)*(nz/B.z);B.vy=cy-(cy-B.vy)*(nz/B.z);B.z=nz}
+  else if(v==='fit')wbFit();
+  else if(v==='reqs'){layoutReqs();wbFit();msg.textContent='Requirements added. Notes already on the board were left where they are.'}
+  else if(v==='open'){const it=get(B.sel);if(it&&it.req)openEditor(it.req);return}
+  else if(v==='clear'){if(!B.clearArm){B.clearArm=true}else{snap();B.items=[];B.sel=null;B.clearArm=false;saveBoard();msg.textContent='Board cleared. Undo brings it back.'}}
+  else if(v==='png'){
+    try{const blob=await wbPng();if(!blob){msg.textContent='The board is empty.';return}
+      try{await navigator.clipboard.write([new ClipboardItem({'image/png':blob})]);msg.textContent='Copied. Open your Microsoft Whiteboard and press Ctrl+V.';$('wbPreview').innerHTML=''}
+      catch(e){$('wbPreview').innerHTML=`<img alt="Board preview" src="${URL.createObjectURL(blob)}"><p class="msg">This browser blocked copying the image. Right-click the picture, choose Copy image, then paste it into your whiteboard.</p>`;msg.textContent='Image ready below.'}
+    }catch(e){msg.textContent='Could not build the image.'}
+    return}
+  else if(v==='svg'){const b=boardSVG();if(!b){msg.textContent='The board is empty.';return}await wbCopyText(b.svg,'SVG copied.');return}
+  else if(v==='notes'){const n=B.items.filter(i=>i.t==='note'&&i.text).sort((a,b)=>a.y-b.y||a.x-b.x);
+    if(!n.length){msg.textContent='There are no notes to copy.';return}await wbCopyText(n.map(i=>'- '+i.text.replace(/\s*\n\s*/g,' ')).join('\n'),`${n.length} notes copied as a list.`);return}
+  else if(v==='json'){const d=$('wbData');d.hidden=!d.hidden;$('wbJson').value=JSON.stringify(B.items,null,1);return}
+  else if(v==='loadjson'){try{const d=JSON.parse($('wbJson').value);if(!Array.isArray(d))throw 0;snap();B.items=d;B.sel=null;saveBoard();msg.textContent=`Loaded ${d.length} items.`}catch(e){msg.textContent='That is not valid board data.';return}}
+  wbSync();wbDraw();
+}
+document.addEventListener('keydown',e=>{
+  if(S.tab!=='whiteboard'||B.editing||/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||''))return;
+  if((e.key==='Delete'||e.key==='Backspace')&&B.sel){e.preventDefault();wbAction('act:del')}
+  else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();wbAction('act:undo')}
+  else if(e.key==='Escape'){B.tool='select';B.sel=null;wbSync();wbDraw()}
+});
 function renderView(){
   const rs=visible();
-  if(!S.reqs.length&&S.tab!=='report'){$('view').innerHTML='<div class="empty">No requirements yet. Add one with <b>+ New requirement</b>, or paste a list under Import, export and reset.</div>';return}
-  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView,tests:testsView,criteria:criteriaView,report:reportView})[S.tab](rs);
+  if(!S.reqs.length&&S.tab!=='report'&&S.tab!=='whiteboard'){$('view').innerHTML='<div class="empty">No requirements yet. Add one with <b>+ New requirement</b>, or paste a list under Import, export and reset.</div>';return}
+  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView,tests:testsView,criteria:criteriaView,report:reportView,whiteboard:whiteboardView})[S.tab](rs);
+  if(S.tab==='whiteboard')wbMount();
 }
 
 /* editor */
@@ -732,7 +1004,8 @@ function exportWork(){
 
 /* events */
 document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#blank,#doImport,#doExport,#copyExport,[data-addtest],[data-rmtest],[data-addac],[data-rmac],#rpRich,#rpMd,#rpSnap');if(!t)return;
+  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#blank,#doImport,#doExport,#copyExport,[data-addtest],[data-rmtest],[data-addac],[data-rmac],#rpRich,#rpMd,#rpSnap,[data-wb]');if(!t)return;
+  if(t.dataset.wb){wbAction(t.dataset.wb);return}
   if(t.id==='rpRich')copyRich();else if(t.id==='rpMd')copyMd();else if(t.id==='rpSnap')saveSnap();
   else if(t.dataset.addac){readDraft();const d=S.editing.draft;let k=d.criteria.length+1;while(d.criteria.some(c=>c.id==='AC'+k))k++;
     d.criteria.push({id:'AC'+k,text:''});renderEditor();const ti=document.querySelectorAll('.ac-text');ti[ti.length-1]?.focus()}
@@ -772,5 +1045,5 @@ document.addEventListener('input',e=>{
   const k={'rp-name':'name','rp-date':'date','rp-notes':'notes'}[e.target.id];if(!k)return;
   S.rp[k]=e.target.value;saveRp();$('sheet').innerHTML=reportHTML(reportModel());
 });
-init();initReport();renderAll();
+init();initReport();initBoard();renderAll();
 </script>
