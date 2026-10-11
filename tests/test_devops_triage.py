@@ -16,9 +16,15 @@ def rules(r, tid):
 
 def test_reclassification_by_size_and_structure():
     r = review(load_tickets(EX), now=NOW)
-    assert r.suggested_type == {"E2": "story", "F1": "epic", "S2": "epic"}
+    assert r.suggested_type == {"E2": "story", "F1": "epic"}
     assert "F2" not in r.suggested_type            # 6 days, feature is right
     assert "S1" not in r.suggested_type
+
+
+def test_oversize_leaf_is_split_not_promoted():
+    r = review(load_tickets(EX), now=NOW)
+    f = next(f for f in r.findings if f.id == "S2" and f.rule == "split")
+    assert "~3 stories of at most 5" in f.suggestion
 
 
 def test_container_with_children_cannot_be_story():

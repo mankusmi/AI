@@ -29,7 +29,7 @@ def to_markdown(r: Review, title: str = "Backlog review") -> str:
             sz = r.sizes[f.id]
             out.append(f"| {t.id} | {t.title} | {t.type} | **{r.suggested_type[f.id]}** | {'' if sz is None else f'{sz:g}'} | {f.message.split('(', 1)[-1].rstrip(')')} |")
         out.append("")
-    titles = {"too-big": "Larger than a quarter", "bad-hierarchy": "Hierarchy violations", "closed-parent": "Open work under closed parents",
+    titles = {"split": "Too big, split", "too-big": "Larger than a quarter", "bad-hierarchy": "Hierarchy violations", "closed-parent": "Open work under closed parents",
               "broken-parent": "Parent not found", "orphan": "Orphans (no parent)", "area-mismatch": "Area outside parent's area",
               "no-area": "No area path", "shallow-area": "Area too shallow", "duplicate": "Possible duplicates", "stale": "Stale",
               "active-unassigned": "In progress, unassigned", "weak-title": "Weak titles", "thin-container": "Single-child containers",

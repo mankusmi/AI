@@ -14,6 +14,7 @@ from datetime import datetime
 from .tickets import Ticket
 
 LEVEL = {"story": 1, "feature": 2, "epic": 3}
+PLURAL = {1: "stories", 2: "features"}
 NAME = {1: "story", 2: "feature", 3: "epic"}
 
 
@@ -104,6 +105,12 @@ def review(tickets: list[Ticket], cfg: Config | None = None, now: datetime | Non
             why = f"it contains {NAME[floor - 1]}s" if suggest else ""
         else:
             fit = max(_fit(d, cfg), floor)
+            if not kids and fit == 3 and lvl < 3 and not _within(d, lvl, cfg):
+                # a leaf bigger than a sprint isn't an epic; it is too big for what it is, so split it
+                n = -int(-d // (cfg.story_max if lvl == 1 else cfg.feature_max))
+                add(t.id, "split", f"{t.type} is {d:g} days, more than a {NAME[lvl]} should be",
+                    suggestion=f"split into ~{n} {PLURAL[lvl]} of at most {cfg.story_max if lvl == 1 else cfg.feature_max:g} days")
+                continue
             suggest = fit if not _within(d, lvl, cfg) or floor > lvl else None
             if d > cfg.epic_max * (1 + cfg.tolerance):
                 add(t.id, "too-big", f"{d:g} days is more than a quarter; split it", suggestion="split into several epics")
