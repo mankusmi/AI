@@ -138,6 +138,10 @@ h4{font:600 14px var(--font-display);margin:4px 0 8px}
 .tc-row{display:grid;grid-template-columns:1fr 1fr auto;gap:6px;padding:6px 0;border-bottom:1px solid var(--line)}
 .tc-row .tc-title{grid-column:1/-1}
 .tcs td.c,.tcs th.c{text-align:center}
+.tc-row .tc-ac{grid-column:1/-1}
+.ac-row{display:grid;grid-template-columns:auto 1fr auto;gap:6px;align-items:center;padding:4px 0}
+.ac td.crit{max-width:60ch}
+.ac tr.first td{border-top:2px solid var(--line)}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 
@@ -246,7 +250,18 @@ const TESTS={
  'REQ-08':[T('95th percentile page load under 2 s','Performance','Not run'),T('Home page load under 1 s on cable','Performance','Not run')],
  'REQ-09':[T('Screen reader completes sign-in','Accessibility','Passed'),T('All pages pass automated audit','Accessibility','Passed'),T('Keyboard-only claim journey','Accessibility','Passed')]
 };
-SAMPLE.forEach(r=>{if(TESTS[r.id])r.tests=TESTS[r.id]});
+const LINK={'REQ-01':['AC1','AC2','AC3','AC4',''],'REQ-02':['AC1','AC1','AC2','AC3'],'REQ-03':['AC1','AC1','AC2','AC3','AC4'],'REQ-07':['AC1','AC2',''],'REQ-08':['AC1',''],'REQ-09':['AC1','AC2','AC1']};
+const CRIT={
+ 'REQ-01':['Given a registered customer, when they enter valid credentials and an MFA code, then they reach their dashboard','Given a new device, when sign-in is attempted, then an MFA code is required','Given five failed attempts, when a sixth is made, then the account is locked for 15 minutes','Given a forgotten password, when a reset is requested, then an email arrives within 1 minute'],
+ 'REQ-02':['Given an active policy, when the customer opens Documents, then the schedule and certificate download as PDF','Given a lapsed policy, when the customer opens Documents, then it is not listed','Given two customers, when each signs in, then each sees only their own policies'],
+ 'REQ-03':['Given a signed-in customer, when they submit a claim with photos, then a claim reference is shown','Given a photo over 10 MB, when it is uploaded, then it is rejected with a clear message','Given the claims system is slow, when submission times out, then the customer can retry without re-entering details','Given first-time users, when ten try the journey, then at least nine finish it unaided'],
+ 'REQ-07':['Given a card payment, when it completes, then the portal holds no card number','Given a declined card, when payment fails, then the customer sees a reason and can try another card'],
+ 'REQ-08':['The 95th percentile page load is under 2 seconds on a 4G connection from UK locations'],
+ 'REQ-09':['Given a screen reader, when a customer signs in and files a claim, then every step can be completed','Given the automated audit, when it runs on all pages, then no WCAG 2.2 AA failures are reported'],
+ 'REQ-13':['At least 60% of customers are on digital-only documents 12 months after launch']
+};
+SAMPLE.forEach(r=>{if(TESTS[r.id]){r.tests=TESTS[r.id];r.tests.forEach((t,i)=>t.ac=(LINK[r.id]||[])[i]||'')}
+  if(CRIT[r.id])r.criteria=CRIT[r.id].map((text,i)=>({id:'AC'+(i+1),text}))});
 const S={reqs:[],tab:'board',sel:null,editing:null,q:'',ftype:'',fstatus:''};
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -261,9 +276,16 @@ const TSTAT=['Not run','Passed','Failed','Blocked'];
 function sync(r){if(r.tests.length){r.testsTotal=r.tests.length;r.testsPassed=r.tests.filter(t=>t.status==='Passed').length}return r}
 function norm(r,i){
   const o=norm0(r,i);
-  o.tests=(Array.isArray(r.tests)?r.tests:[]).map(t=>({title:String(t.title||'').trim(),type:TTYPES.includes(t.type)?t.type:'Unit',status:TSTAT.includes(t.status)?t.status:'Not run'}));
+  o.criteria=(Array.isArray(r.criteria)?r.criteria:[]).map((c,k)=>({id:String(c.id||'AC'+(k+1)),text:String(typeof c==='string'?c:c.text||'').trim()})).filter(c=>c.text);
+  o.tests=(Array.isArray(r.tests)?r.tests:[]).map(t=>({title:String(t.title||'').trim(),type:TTYPES.includes(t.type)?t.type:'Unit',status:TSTAT.includes(t.status)?t.status:'Not run',
+    ac:o.criteria.some(c=>c.id===t.ac)?t.ac:''}));
   return sync(o);
 }
+function critStatus(r,c){
+  const l=r.tests.filter(t=>t.ac===c.id);
+  return !l.length?'Untested':l.some(t=>t.status==='Failed')?'Failed':l.some(t=>t.status==='Blocked')?'Blocked':l.every(t=>t.status==='Passed')?'Verified':'Not run';
+}
+const CCLS={Verified:'passing',Failed:'failing',Blocked:'blocked','Not run':'none',Untested:'none'};
 function norm0(r,i){
   const list=v=>Array.isArray(v)?v.map(x=>String(x).trim()).filter(Boolean):String(v||'').split(',').map(x=>x.trim()).filter(Boolean);
   const pri=String(r.priority||'Should').replace(/[^A-Za-z]/g,'');
@@ -291,6 +313,9 @@ function flags(){
   S.reqs.forEach(r=>{
     if(r.priority!=='Wont'){
       if(['Approved','Built','Verified'].includes(r.status)&&!r.workItem)f.push({id:r.id,sev:'warn',t:r.status+' but no work item in the tracker'});
+      if(!r.criteria.length&&(r.priority==='Must'||['Approved','Built','Verified'].includes(r.status)))f.push({id:r.id,sev:'warn',t:'No acceptance criteria'});
+      if(['Built','Verified'].includes(r.status))r.criteria.filter(c=>critStatus(r,c)==='Untested').forEach(c=>f.push({id:r.id,sev:'warn',t:`${r.status} but ${c.id} has no test`}));
+      if(r.status==='Verified'){const open=r.criteria.filter(c=>critStatus(r,c)!=='Verified'&&critStatus(r,c)!=='Untested');if(open.length)f.push({id:r.id,sev:'bad',t:`Verified but ${open.map(c=>c.id).join(', ')} not passing`})}
       if(r.priority==='Must'&&!r.tests.length&&!r.testsTotal)f.push({id:r.id,sev:'warn',t:'Must have with no test cases'});
       if(r.build==='failing')f.push({id:r.id,sev:'bad',t:'Build is failing'});
       if(['Built','Verified'].includes(r.status)&&!r.testsTotal)f.push({id:r.id,sev:'warn',t:r.status+' with no tests recorded'});
@@ -322,7 +347,7 @@ function renderChrome(){
   $('legend').innerHTML=PRI.map(p=>`<span><span class="dot" style="background:var(--${p.toLowerCase()})"></span>${PLABEL[p]} ${eff[p]} pts</span>`).join('');
   const fl=flags();
   $('flags').innerHTML=fl.length?fl.slice(0,12).map((x,i)=>`<button class="flag ${x.sev}" data-id="${esc(x.id)}"><small>${esc(x.id)}</small>${esc(x.t)}</button>`).join('')+(fl.length>12?`<span class="msg" style="align-self:center">+${fl.length-12} more</span>`:''):'<span class="msg">No gaps or conflicts found.</span>';
-  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['tests','Tests'],['delivery','Delivery'],['table','Table']]
+  $('tabs').innerHTML=[['board','Priority board'],['graph','Dependency map'],['matrix','Goal traceability'],['criteria','Acceptance'],['tests','Tests'],['delivery','Delivery'],['table','Table']]
     .map(([k,l])=>`<button class="tab" role="tab" data-tab="${k}" aria-selected="${S.tab===k}">${l}</button>`).join('');
   $('ftype').innerHTML='<option value="">All types</option>'+TYPES.map(t=>`<option ${S.ftype===t?'selected':''}>${t}</option>`).join('');
   $('fstatus').innerHTML='<option value="">All statuses</option>'+STATUS.map(t=>`<option ${S.fstatus===t?'selected':''}>${t}</option>`).join('');
@@ -431,9 +456,32 @@ function testsView(rs){
   const list=`<h4 style="margin-top:18px">Failed and blocked tests</h4>${bad.length?`<table><tbody>${bad.map(x=>`<tr data-open="${esc(x.r.id)}"><td class="mono">${esc(x.r.id)}</td><td>${esc(x.t.title)||'Untitled test'}</td><td>${esc(x.t.type)}</td><td><span class="bd ${x.t.status==='Failed'?'failing':'blocked'}">${x.t.status}</span></td></tr>`).join('')}</tbody></table>`:'<p class="msg">Nothing failing or blocked.</p>'}`;
   return meters+cov+list;
 }
+function criteriaView(rs){
+  const live=rs.filter(r=>r.priority!=='Wont');
+  if(!live.length)return '<div class="empty">No requirements match the filters.</div>';
+  const pct=(a,b)=>b?Math.round(100*a/b):0;
+  const cs=live.flatMap(r=>r.criteria.map(c=>({r,c,s:critStatus(r,c)})));
+  const n=s=>cs.filter(x=>x.s===s).length;
+  const withC=live.filter(r=>r.criteria.length).length,musts=live.filter(r=>r.priority==='Must'),mC=musts.filter(r=>r.criteria.length).length;
+  const mt=(l,v,sub,w)=>`<div class="meter"><span>${l}</span><b>${v}</b> <span style="display:inline;text-transform:none;letter-spacing:0">${sub}</span>${w!=null?`<div class="track"><i style="width:${w}%"></i></div>`:''}</div>`;
+  const meters=`<div class="meters">${mt('Requirements with criteria',pct(withC,live.length)+'%',`${withC} of ${live.length}`,pct(withC,live.length))}
+   ${mt('Musts with criteria',pct(mC,musts.length)+'%',`${mC} of ${musts.length}`,pct(mC,musts.length))}
+   ${mt('Criteria verified',pct(n('Verified'),cs.length)+'%',`${n('Verified')} of ${cs.length}`,pct(n('Verified'),cs.length))}
+   ${mt('Failing or blocked',n('Failed')+n('Blocked'),`${n('Failed')} failed, ${n('Blocked')} blocked`)}
+   ${mt('With no test',n('Untested'),'criteria to cover')}</div>`;
+  const rows=[...live].sort((a,b)=>PRI.indexOf(a.priority)-PRI.indexOf(b.priority)||a.id.localeCompare(b.id));
+  const body=rows.map(r=>{
+    const head=`<td rowspan="${Math.max(1,r.criteria.length)}"><span class="mono">${esc(r.id)}</span> ${esc(r.title)}<br>${pill(r.priority)}</td>`;
+    if(!r.criteria.length)return `<tr class="first ${S.sel===r.id?'sel':''}" data-open="${esc(r.id)}">${head}<td colspan="4" style="color:${r.priority==='Must'?'var(--bad)':'var(--muted)'}">No acceptance criteria</td></tr>`;
+    return r.criteria.map((c,i)=>{const s=critStatus(r,c);const k=r.tests.filter(t=>t.ac===c.id);
+      return `<tr class="${i===0?'first ':''}${S.sel===r.id?'sel':''}" data-open="${esc(r.id)}">${i===0?head:''}<td class="mono">${esc(c.id)}</td><td class="crit">${esc(c.text)}</td>
+      <td><span class="bd ${CCLS[s]}">${s}</span></td><td class="num">${k.length?`${k.filter(t=>t.status==='Passed').length}/${k.length}`:''}</td></tr>`}).join('')}).join('');
+  return `${meters}<p class="hint">A criterion is verified when every test case linked to it has passed. Link test cases to criteria in the requirement editor.</p>
+   <table class="ac"><thead><tr><th>Requirement</th><th>ID</th><th>Criterion</th><th>Status</th><th class="num">Tests passed</th></tr></thead><tbody>${body}</tbody></table>`;
+}
 function renderView(){
   const rs=visible();
-  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView,tests:testsView})[S.tab](rs);
+  $('view').innerHTML=({board:boardView,graph:graphView,matrix:matrixView,table:tableView,delivery:deliveryView,tests:testsView,criteria:criteriaView})[S.tab](rs);
 }
 
 /* editor */
@@ -462,10 +510,15 @@ function renderEditor(){
    <label><span>Build</span><select id="f-build">${opt(BUILDS,r.build)}</select></label></div>
    <div class="row2"><label><span>Tests passing</span><input type="number" id="f-tp" min="0" value="${r.testsPassed}"></label>
    <label><span>Tests total</span><input type="number" id="f-tt" min="0" value="${r.testsTotal}"></label></div>
+   <div><span class="msg">Acceptance criteria</span>
+   <div id="acs">${r.criteria.map((c,i)=>`<div class="ac-row" data-acid="${esc(c.id)}"><span class="mono">${esc(c.id)}</span><input type="text" class="ac-text" value="${esc(c.text)}" placeholder="Given ..., when ..., then ..." aria-label="Criterion ${esc(c.id)}">
+    <button type="button" class="btn" data-rmac="${i}" aria-label="Remove criterion ${esc(c.id)}">×</button></div>`).join('')}</div>
+   <button type="button" class="btn" data-addac="1" style="margin-top:6px">+ Add criterion</button></div>
    <div><span class="msg">Test cases${r.tests.length?` (${r.tests.filter(t=>t.status==='Passed').length} of ${r.tests.length} passing; the counts above follow this list)`:''}</span>
    <div id="tcs">${r.tests.map((t,i)=>`<div class="tc-row"><input type="text" class="tc-title" value="${esc(t.title)}" placeholder="What should be verified?" aria-label="Test case ${i+1} title">
     <select class="tc-type" aria-label="Test type">${opt(TTYPES,t.type)}</select><select class="tc-status" aria-label="Test status">${opt(TSTAT,t.status)}</select>
-    <button type="button" class="btn" data-rmtest="${i}" aria-label="Remove test case ${i+1}">×</button></div>`).join('')}</div>
+    <button type="button" class="btn" data-rmtest="${i}" aria-label="Remove test case ${i+1}">×</button>
+    <select class="tc-ac" aria-label="Acceptance criterion this test covers"><option value="">Covers no criterion</option>${r.criteria.map(c=>`<option value="${esc(c.id)}" ${c.id===t.ac?'selected':''}>${esc(c.id)}: ${esc(c.text.slice(0,45))}</option>`).join('')}</select></div>`).join('')}</div>
    <button type="button" class="btn" data-addtest="1" style="margin-top:6px">+ Add test case</button></div>
    <div><span class="msg">Depends on</span><div class="deps">${S.reqs.filter(x=>x.id!==r.id).map(x=>`<label><input type="checkbox" class="f-dep" value="${esc(x.id)}" ${r.depends.includes(x.id)?'checked':''}><span class="mono">${esc(x.id)}</span> ${esc(x.title)}</label>`).join('')||'<span class="msg">No other requirements yet.</span>'}</div></div>
    <div class="actions"><button class="btn primary" type="submit">${isNew?'Add requirement':'Save changes'}</button>${isNew?'':'<button type="button" class="btn danger" id="del">Delete</button>'}</div>
@@ -477,7 +530,7 @@ function openEditor(id){
 }
 function newReq(){
   let n=S.reqs.length+1;while(S.reqs.some(r=>r.id==='REQ-'+String(n).padStart(2,'0')))n++;
-  S.editing={isNew:true,orig:null,draft:{id:'REQ-'+String(n).padStart(2,'0'),title:'',description:'',type:'Functional',priority:'Should',status:'Draft',stakeholder:'',goals:[],effort:3,depends:[],tests:[],workItem:'',pr:'',sprint:'',assignee:'',env:'Not started',build:'none',testsPassed:0,testsTotal:0}};
+  S.editing={isNew:true,orig:null,draft:{id:'REQ-'+String(n).padStart(2,'0'),title:'',description:'',type:'Functional',priority:'Should',status:'Draft',stakeholder:'',goals:[],effort:3,depends:[],criteria:[],tests:[],workItem:'',pr:'',sprint:'',assignee:'',env:'Not started',build:'none',testsPassed:0,testsTotal:0}};
   renderAll();$('f-title')?.focus();
 }
 function readDraft(){
@@ -488,11 +541,13 @@ function readDraft(){
   d.depends=[...document.querySelectorAll('.f-dep:checked')].map(c=>c.value);
   d.workItem=$('f-wi').value.trim();d.pr=$('f-pr').value.trim();d.sprint=$('f-sprint').value.trim();d.assignee=$('f-assignee').value.trim();
   d.env=$('f-env').value;d.build=$('f-build').value;d.testsPassed=Math.max(0,Number($('f-tp').value)||0);d.testsTotal=Math.max(0,Number($('f-tt').value)||0);
-  d.tests=[...document.querySelectorAll('.tc-row')].map(row=>({title:row.querySelector('.tc-title').value.trim(),type:row.querySelector('.tc-type').value,status:row.querySelector('.tc-status').value}));
+  d.criteria=[...document.querySelectorAll('.ac-row')].map(row=>({id:row.dataset.acid,text:row.querySelector('.ac-text').value.trim()}));
+  d.tests=[...document.querySelectorAll('.tc-row')].map(row=>({title:row.querySelector('.tc-title').value.trim(),type:row.querySelector('.tc-type').value,status:row.querySelector('.tc-status').value,ac:row.querySelector('.tc-ac').value}));
   sync(d);
 }
 function commit(){
-  readDraft();const d=S.editing.draft;d.tests=d.tests.filter(t=>t.title);sync(d);
+  readDraft();const d=S.editing.draft;d.criteria=d.criteria.filter(c=>c.text);d.tests=d.tests.filter(t=>t.title);
+  d.tests.forEach(t=>{if(!d.criteria.some(c=>c.id===t.ac))t.ac=''});sync(d);
   if(S.editing.isNew)S.reqs.push(d);else S.reqs[S.reqs.findIndex(r=>r.id===S.editing.orig)]=d;
   S.sel=d.id;S.editing=null;save();renderAll();
 }
@@ -543,16 +598,16 @@ function exportWork(){
   const pn={Must:1,Should:2,Could:3,Wont:4},fmt=$('expFmt').value;let out='';
   if(fmt==='ado'){
     const wt={Business:'Feature',Functional:'User Story','Non-functional':'User Story',Constraint:'User Story'};
-    out='Work Item Type,Title,Description,Priority,Story Points,Iteration Path,Tags\n'+l.map(r=>[wt[r.type],r.id+' '+r.title,r.description,pn[r.priority],r.effort||'',r.sprint,[r.id,r.priority==='Wont'?'WontHave':r.priority+'Have',...r.goals].join('; ')].map(csvq).join(',')).join('\n');
+    out='Work Item Type,Title,Description,Priority,Story Points,Iteration Path,Tags,Acceptance Criteria\n'+l.map(r=>[wt[r.type],r.id+' '+r.title,r.description,pn[r.priority],r.effort||'',r.sprint,[r.id,r.priority==='Wont'?'WontHave':r.priority+'Have',...r.goals].join('; '),r.criteria.map(c=>c.text).join('<br>')].map(csvq).join(',')).join('\n');
   }else if(fmt==='jira'){
     const pr={Must:'Highest',Should:'High',Could:'Medium',Wont:'Lowest'},it={Business:'Epic',Functional:'Story','Non-functional':'Story',Constraint:'Task'};
-    out='Summary,Issue Type,Priority,Description,Labels,Sprint,Story point estimate\n'+l.map(r=>[r.id+' '+r.title,it[r.type],pr[r.priority],r.description,[r.id,r.priority,...r.goals.map(g=>g.replace(/\s+/g,'-'))].join(' '),r.sprint,r.effort||''].map(csvq).join(',')).join('\n');
+    out='Summary,Issue Type,Priority,Description,Labels,Sprint,Story point estimate\n'+l.map(r=>[r.id+' '+r.title,it[r.type],pr[r.priority],r.description+(r.criteria.length?'\n\nAcceptance criteria:\n'+r.criteria.map(c=>'* '+c.text).join('\n'):''),[r.id,r.priority,...r.goals.map(g=>g.replace(/\s+/g,'-'))].join(' '),r.sprint,r.effort||''].map(csvq).join(',')).join('\n');
   }else{
-    out=PRI.map(p=>{const g=l.filter(r=>r.priority===p);return g.length?`### ${PLABEL[p]}\n`+g.map(r=>`- [${r.status==='Verified'?'x':' '}] ${r.id} ${r.title} (${r.effort} pts${r.goals.length?', goals: '+r.goals.join(' / '):''})${r.pr?' '+r.pr:''}`).join('\n'):''}).filter(Boolean).join('\n\n');
+    out=PRI.map(p=>{const g=l.filter(r=>r.priority===p);return g.length?`### ${PLABEL[p]}\n`+g.map(r=>`- [${r.status==='Verified'?'x':' '}] ${r.id} ${r.title} (${r.effort} pts${r.goals.length?', goals: '+r.goals.join(' / '):''})${r.pr?' '+r.pr:''}`+r.criteria.map(c=>`\n  - [${critStatus(r,c)==='Verified'?'x':' '}] ${c.text}`).join('')).join('\n'):''}).filter(Boolean).join('\n\n');
   }
   const tl=l.flatMap(r=>r.tests.filter(t=>t.title).map(t=>({r,t})));
   if(tl.length){
-    if(fmt==='ado')out+='\n'+tl.map(({r,t})=>['Test Case',r.id+' '+t.title,'',pn[r.priority],'',r.sprint,[r.id,t.type,'Test'].join('; ')].map(csvq).join(',')).join('\n');
+    if(fmt==='ado')out+='\n'+tl.map(({r,t})=>['Test Case',r.id+' '+t.title,'',pn[r.priority],'',r.sprint,[r.id,t.type,'Test'].join('; '),''].map(csvq).join(',')).join('\n');
     else if(fmt==='jira')out+='\n'+tl.map(({r,t})=>[r.id+' '+t.title,'Test',{Must:'Highest',Should:'High',Could:'Medium',Wont:'Lowest'}[r.priority],'',[r.id,t.type].join(' '),r.sprint,''].map(csvq).join(',')).join('\n');
     else out+='\n\n### Test cases\n'+tl.map(({r,t})=>`- [${t.status==='Passed'?'x':' '}] ${r.id}: ${t.title} (${t.type}, ${t.status})`).join('\n');
   }
@@ -561,8 +616,11 @@ function exportWork(){
 
 /* events */
 document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#doImport,#doExport,#copyExport,[data-addtest],[data-rmtest]');if(!t)return;
-  if(t.dataset.addtest){readDraft();S.editing.draft.tests.push({title:'',type:'Unit',status:'Not run'});sync(S.editing.draft);renderEditor();const ti=document.querySelectorAll('.tc-title');ti[ti.length-1]?.focus()}
+  const t=e.target.closest('[data-tab],[data-open],[data-id],#add,#close,#del,#copy,#load,#reset,#doImport,#doExport,#copyExport,[data-addtest],[data-rmtest],[data-addac],[data-rmac]');if(!t)return;
+  if(t.dataset.addac){readDraft();const d=S.editing.draft;let k=d.criteria.length+1;while(d.criteria.some(c=>c.id==='AC'+k))k++;
+    d.criteria.push({id:'AC'+k,text:''});renderEditor();const ti=document.querySelectorAll('.ac-text');ti[ti.length-1]?.focus()}
+  else if(t.dataset.rmac!=null){readDraft();const d=S.editing.draft,c=d.criteria.splice(Number(t.dataset.rmac),1)[0];d.tests.forEach(x=>{if(c&&x.ac===c.id)x.ac=''});renderEditor()}
+  else if(t.dataset.addtest){readDraft();S.editing.draft.tests.push({title:'',type:'Unit',status:'Not run'});sync(S.editing.draft);renderEditor();const ti=document.querySelectorAll('.tc-title');ti[ti.length-1]?.focus()}
   else if(t.dataset.rmtest!=null){readDraft();S.editing.draft.tests.splice(Number(t.dataset.rmtest),1);renderEditor()}
   else if(t.id==='doImport')importWork();
   else if(t.id==='doExport')exportWork();
