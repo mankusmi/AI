@@ -228,7 +228,7 @@ class _Cache:
 
 def test_browser_auth_interactive_then_silent_and_cache_file(fake_msal, tmp_path):
     cache = tmp_path / "sub" / "cache.json"
-    auth = BrowserAuth("tenant-guid", "client-guid", cache_path=cache)
+    auth = BrowserAuth("tenant-guid", "client-guid", cache_path=cache, secure=False)   # plain-file cache under test
     app = FakeMsalApp.instances[0]
     assert app.authority.endswith("/tenant-guid") and app.client_id == "client-guid"
     assert auth.token() == "interactive-token" and app.interactive_calls == 1
@@ -309,7 +309,7 @@ def test_token_cache_falls_back_to_file_and_says_so(fake_msal, tmp_path, monkeyp
     assert auth.storage == "file" and "plain file" in caplog.text and "libsecret" in caplog.text
     auth.token()
     assert (tmp_path / "cache.json").exists()
-    monkeypatch.delitem(sys.modules, "msal_extensions")             # package not installed at all
+    monkeypatch.setitem(sys.modules, "msal_extensions", None)       # package not installed at all (import raises)
     assert BrowserAuth(cache_path=tmp_path / "c2.json").storage == "file"
 
 
