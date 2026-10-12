@@ -27,3 +27,19 @@ Also flags: parent not found / open under closed parent, orphans (with candidate
 outside parent's area, missing or too-shallow area paths (`--min-area-depth`), too big for a quarter, empty or single-child
 containers, duplicates (same title + area), stale items, in-progress but unassigned, weak titles, unsized items.
 `changes.csv` has one row per ticket needing action (suggested type and parent) for bulk update. See `examples/backlog.csv`.
+
+## devops-report: state of play for a head of delivery
+
+    python -m devops_planner.report_cli backlog.csv -o state-of-play.html          # or -f markdown
+    python -m devops_planner.report_cli backlog.csv --as-of 2026-10-12
+
+One page: overall RAG, completion %, in progress / blocked / not started, forecast finish date, progress and RAG per epic
+(per top-level area if there are no epics), weekly throughput, blocked and gone-quiet work, backlog hygiene, and a short
+list of decisions needed. Needs `Parent` and `State`; `Closed Date` and `Changed Date` enable throughput, forecast and ageing.
+
+- Progress and throughput count leaf work items (those with no children), weighted by days of work; items with no estimate count by number.
+- An epic is **red** if it has blocked work, no movement for 30+ days, or an open critical bug; **amber** if over 25% of its open work is
+  unsized or nothing is in progress. Overall is red when a quarter of open epics are red.
+- Forecast = remaining days of work / average days closed per week over the last 4 completed weeks.
+- Blocked means state `Blocked` or a `blocked` tag. In progress means state Active / In Progress / Doing / Committed etc.
+See `examples/delivery.csv`.
