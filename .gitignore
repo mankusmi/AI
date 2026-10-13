@@ -10,3 +10,4 @@ pbi_profile_output/
 *.duckdb
 *.duckdb.wal
 sp_profile_output/
+pbi_dataflows_output/
