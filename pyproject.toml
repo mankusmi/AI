@@ -23,6 +23,7 @@ pbi-profile = "pbi_profiler.cli:main"
 sp-profile = "sp_profiler.cli:main"
 devops-plan = "devops_planner.cli:main"
 devops-triage = "devops_planner.triage_cli:main"
+devops-report = "devops_planner.report_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pbi_profiler*", "sp_profiler*", "devops_planner*"]

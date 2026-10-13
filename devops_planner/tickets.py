@@ -21,6 +21,7 @@ ALIASES = {
     "area": ["area", "areapath", "component"],
     "parent": ["parent", "parentid", "parentworkitemid", "parentkey", "epiclink"],
     "changed": ["changeddate", "updated", "lastupdated", "statechangedate", "modified"],
+    "closed": ["closeddate", "resolveddate", "closedon", "resolved", "donedate"],
     "days": ["days", "durationdays", "effortdays"],
     "depends_on": ["dependson", "dependencies", "predecessors", "blockedby", "blocks_inverse"],
 }
@@ -46,6 +47,7 @@ class Ticket:
     parent: str = ""
     changed: datetime | None = None
     days: float | None = None
+    closed: datetime | None = None
 
     @property
     def area_parts(self) -> list[str]:
@@ -118,6 +120,7 @@ def _ticket(row: dict) -> Ticket:
         parent=str(got.get("parent", "")).strip(),
         changed=_date(got.get("changed")),
         days=_number(got.get("days")),
+        closed=_date(got.get("closed")),
     )
 
 
