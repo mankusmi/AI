@@ -43,3 +43,25 @@ list of decisions needed. Needs `Parent` and `State`; `Closed Date` and `Changed
 - Forecast = remaining days of work / average days closed per week over the last 4 completed weeks.
 - Blocked means state `Blocked` or a `blocked` tag. In progress means state Active / In Progress / Doing / Committed etc.
 See `examples/delivery.csv`.
+
+### Day-to-day monitoring: the data lead view
+
+`devops-report` now has two sections on one page: **Overview** (for the head of delivery) and **Data lead view** (for daily use).
+
+    python -m devops_planner.report_cli export.csv --previous yesterday.csv -o today.html
+    python -m devops_planner.report_cli export.csv --view lead          # data lead section only
+    python -m devops_planner.report_cli export.csv --view exec          # head of delivery section only
+
+The data lead view has: six status tiles; a ranked **Needs attention** list; **Since the last run** (closed, started, newly blocked,
+unblocked, added, reopened; needs `--previous`); and five charts: burn-up, weekly throughput, workload by person, stuck and ageing
+work, and a heatmap of problems by area. Every chart has hover details and a "Table view" underneath it.
+
+Flags, from most to least serious (every flag shows an icon and a word, never colour alone):
+- **Critical:** blocked work; open critical bugs; in progress for over twice the ageing limit with no update.
+- **Serious:** in progress and quiet past the ageing limit (`--aging-days`, default 14); anyone over the WIP limit (`--wip-limit`, default 3
+  items in flight); in progress with no owner; last full week's throughput under half the 4-week average; nothing closed recently.
+- **Watch:** closed items with no Closed Date (they vanish from throughput); in-progress items with no Changed Date (ageing can't be checked);
+  more than 25% of open work unestimated; items untouched for 60+ days; items with no parent; items that look the wrong type.
+
+Daily routine: export from Azure DevOps each morning, keep yesterday's file, and pass it as `--previous`.
+The burn-up uses today's scope for every week (scope history isn't in a single export). See `examples/daily.csv` and `examples/daily_yesterday.csv`.
