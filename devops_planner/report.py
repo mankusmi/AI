@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from .tickets import Ticket
+from .datalead import DataLead, build_datalead
 from .triage import Config, review
 
 ACTIVE = {"active", "in progress", "doing", "committed", "in review", "in development", "resolved", "testing"}
@@ -54,10 +55,12 @@ class Report:
     health_pct: float = 100
     health_issues: list[tuple[str, int]] = field(default_factory=list)
     decisions: list[str] = field(default_factory=list)
+    lead: DataLead | None = None
+    titles: dict[str, str] = field(default_factory=dict)
 
 
 def build_report(tickets: list[Ticket], cfg: Config | None = None, as_of: datetime | None = None,
-                 weeks: int = 6, aging_days: int = 14) -> Report:
+                 weeks: int = 6, aging_days: int = 14, previous: list[Ticket] | None = None, wip_limit: int = 3) -> Report:
     cfg = cfg or Config()
     now = as_of or datetime.now()
     rv = review(tickets, cfg, now)
@@ -130,8 +133,10 @@ def build_report(tickets: list[Ticket], cfg: Config | None = None, as_of: dateti
 
     # --- flow ---
     start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_starts = []
     for w in range(weeks, 0, -1):          # completed weeks only; the current partial week would drag the average down
         a, b = start - timedelta(weeks=w), start - timedelta(weeks=w - 1)
+        week_starts.append(a)
         cl = [t for t in leaves if t.closed and a <= t.closed < b]
         rep.weekly.append((a.strftime("%d %b"), len(cl), sum(weight(t) or 0 for t in cl)))
     rep.remaining_days = sum(weight(t) or 0 for t in leaves if cats[t.id] != "done")
@@ -173,4 +178,6 @@ def build_report(tickets: list[Ticket], cfg: Config | None = None, as_of: dateti
         rep.headlines.append(f"{sum(r.rag == 'red' for r in open_rows)} of {len(open_rows)} open {rep.group_by}s are red, "
                              f"{sum(r.rag == 'amber' for r in open_rows)} amber.")
     rep.headlines.append(f"Backlog hygiene: {rep.health_pct:.0f}% of open items are free of problems.")
+    rep.titles = {t.id: t.title for t in tickets}
+    rep.lead = build_datalead(leaves, tickets, cats, rv, rep.weekly, week_starts, now, wip_limit, aging_days, previous, category)
     return rep
