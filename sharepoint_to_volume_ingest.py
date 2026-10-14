@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # SharePoint → Unity Catalog Volume ingestion
 # MAGIC
-# MAGIC Copies files from a SharePoint document-library folder into a UC Volume using the Microsoft Graph API
+# MAGIC Clears the target volume path, then copies files from a SharePoint document-library folder (preserving its folder structure) into a UC Volume using the Microsoft Graph API
 # MAGIC (app-only / client-credentials auth).
 # MAGIC
 # MAGIC **Prerequisites**
@@ -21,6 +21,7 @@ dbutils.widgets.text("library_name", "Documents", "Document library (drive) name
 dbutils.widgets.text("folder_path", "", "Folder inside library ('' = root)")
 dbutils.widgets.text("volume_path", "/Volumes/main/raw/sharepoint", "Target volume path")
 dbutils.widgets.dropdown("recursive", "true", ["true", "false"], "Recurse into subfolders")
+dbutils.widgets.dropdown("clear_volume", "true", ["true", "false"], "Delete everything in target volume path first")
 dbutils.widgets.dropdown("overwrite", "false", ["true", "false"], "Overwrite existing files (else skip if same size)")
 dbutils.widgets.text("extensions", "", "Only these extensions, comma-separated (blank = all)")
 
@@ -31,6 +32,7 @@ LIBRARY_NAME = dbutils.widgets.get("library_name").strip()
 FOLDER_PATH = dbutils.widgets.get("folder_path").strip("/ ")
 VOLUME_PATH = dbutils.widgets.get("volume_path").rstrip("/")
 RECURSIVE = dbutils.widgets.get("recursive") == "true"
+CLEAR_VOLUME = dbutils.widgets.get("clear_volume") == "true"
 OVERWRITE = dbutils.widgets.get("overwrite") == "true"
 EXTENSIONS = tuple(
     "." + e.strip().lower().lstrip(".")
@@ -104,6 +106,21 @@ if drive is None:
 
 print(f"Site:    {site['displayName']} ({site['id']})")
 print(f"Library: {drive['name']} ({drive['id']})")
+
+# COMMAND ----------
+
+# Clear the target volume path (contents only; the path itself is kept).
+# Runs after auth + site/library lookup so a credentials/config error never wipes the volume.
+if CLEAR_VOLUME:
+    parts = [p for p in VOLUME_PATH.split("/") if p]
+    if len(parts) < 4 or parts[0] != "Volumes":
+        # Require /Volumes/<catalog>/<schema>/<volume>[/subdir] so we never clear a catalog/schema root.
+        raise ValueError(f"Refusing to clear '{VOLUME_PATH}': expected /Volumes/<catalog>/<schema>/<volume>[/...]")
+    os.makedirs(VOLUME_PATH, exist_ok=True)
+    entries = dbutils.fs.ls(VOLUME_PATH)
+    for entry in entries:
+        dbutils.fs.rm(entry.path, True)
+    print(f"Cleared {len(entries)} top-level item(s) from {VOLUME_PATH}")
 
 # COMMAND ----------
 
