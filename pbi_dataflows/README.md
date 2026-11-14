@@ -23,7 +23,8 @@ Output (`out/<workspace>/`):
 | `dataflows/NN_name.json` | Raw dataflow definition. `NN` is the run position, so the listing is the execution order |
 | `manifest.json` | Run order, stages, dependencies, datasources, refresh history, per-dataflow metadata |
 | `workspace_objects.json` | Datasets, reports, dashboards, dataflows, users |
-| `summary.html` / `SUMMARY.md` | Workspace properties, object counts and lists, run order, what each dataflow does |
+| `summary.html` / `SUMMARY.md` | Workspace properties, object counts and lists, the lineage diagram, run order, what each dataflow does |
+| `lineage.html` / `LINEAGE.md` | Lineage diagram: sources → dataflows (by run stage) → datasets → reports. HTML is an SVG; the Markdown has a Mermaid version plus an edge list |
 | `docs/NN_name.md` | Per-dataflow documentation: sources, entities and columns, transformations, dependencies, refreshes |
 
 ## How run order is derived
