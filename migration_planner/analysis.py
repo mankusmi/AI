@@ -24,7 +24,7 @@ class Datapoint:
     model: str
     table: str
     name: str
-    kind: str  # column | measure
+    kind: str  # column | calculated column | measure
     data_type: str = ""
     format_string: str = ""
     legacy_source: str = ""  # source column for columns, DAX for measures
@@ -67,13 +67,16 @@ class Analysis:
             rows.append({
                 "datapoint": dp.key, "model": dp.model, "table": dp.table, "name": dp.name, "kind": dp.kind,
                 "data_type": dp.data_type, "definition": dp.legacy_source,
+                "pbi_table": dp.table, "pbi_column": dp.name,
+                "suggested_snowflake_type": snowflake_type(dp.data_type) if dp.kind == "column" else "",
                 "also_known_as": "; ".join(sorted(dp.aliases)),
                 "needed_by": "; ".join(rep), "dashboards_replaced": n, "visuals": visuals,
                 "also_used_by_staying": "; ".join(stay),
-                "decision": "SHARED - decide source" if stay else "request from new system",
+                "decision": ("SHARED - decide source" if stay else
+                             "request column" if dp.kind == "column" else "recreate logic"),
                 "priority": "High" if n >= 3 else "Medium" if n == 2 else "Low",
                 "required_via_measures": "; ".join(sorted(dp.via_measures)),
-                "grain": "", "freshness": "", "new_system_field": "", "status": "open", "comments": "",
+                "grain": "", "freshness": "", "status": "open", "comments": "",
             })
         order = {"High": 0, "Medium": 1, "Low": 2}
         rows.sort(key=lambda r: (order[r["priority"]], -r["dashboards_replaced"], -r["visuals"], r["datapoint"]))
@@ -94,6 +97,14 @@ class Analysis:
         return [{"datapoint": dp.key, "kind": dp.kind, "used_by": "; ".join(sorted(dp.visual_counts))}
                 for dp in self.datapoints.values()
                 if self._statuses(dp) == {"stay"}]
+
+
+_SF_TYPES = {"int64": "NUMBER(38,0)", "double": "FLOAT", "decimal": "NUMBER(38,6)", "string": "VARCHAR",
+             "datetime": "TIMESTAMP_NTZ", "boolean": "BOOLEAN", "binary": "BINARY"}
+
+
+def snowflake_type(pbi_type: str) -> str:
+    return _SF_TYPES.get((pbi_type or "").lower(), "")
 
 
 def _load_model(e: DashboardEntry) -> Model:
@@ -141,6 +152,8 @@ def analyze(entries: list[DashboardEntry], aliases: Optional[dict[str, str]] = N
                 dp.data_type = col.data_type or ""
                 dp.format_string = col.format_string or ""
                 dp.description = col.description or ""
+                if col.is_calculated:
+                    dp.kind = "calculated column"
                 dp.legacy_source = (col.expression or "").strip() if col.is_calculated else (col.source_column or col.name)
             else:
                 dp.unresolved = True
@@ -203,6 +216,8 @@ def analyze(entries: list[DashboardEntry], aliases: Optional[dict[str, str]] = N
                 else:
                     col = _find_column(model, f.table, f.field)
                     dp = get_dp(model, table, f.field, "column", col=col)
+                    if col is not None and col.is_calculated:
+                        expand_measure(col, dp.key, set())
                 if dp.key not in used:
                     used.add(dp.key)
                     add(dp, direct=1, role=f.role)

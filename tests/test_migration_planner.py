@@ -45,3 +45,22 @@ def test_cli_build(tmp_path):
     with (tmp_path / "out" / "shopping_list.csv").open(encoding="utf-8-sig") as fh:
         assert list(csv.DictReader(fh))
     assert (tmp_path / "out" / "shopping_list.html").exists()
+
+
+def test_snowflake_catalog_matching_and_xlsx(tmp_path):
+    m = _manifest(tmp_path, {"A": "replace"})
+    cat = tmp_path / "cols.csv"
+    cat.write_text("TABLE_CATALOG,TABLE_SCHEMA,TABLE_NAME,COLUMN_NAME,DATA_TYPE\n"
+                   "DW,MART,SALES,AMOUNT,NUMBER\nDW,MART,SALES,REGION,TEXT\n"
+                   "DW,MART,OTHER,REGION,TEXT\nDW,MART,FACT,COST,NUMBER\nDW,X,FACT2,COST,NUMBER\n")
+    out = tmp_path / "out"
+    assert main(["build", "-m", str(m), "-o", str(out), "--snowflake-columns", str(cat)]) == 0
+    with (out / "shopping_list.csv").open(encoding="utf-8-sig") as fh:
+        rows = {r["datapoint"]: r for r in csv.DictReader(fh)}
+    assert rows["Sales[Amount]"]["snowflake_table"] == "SALES" and rows["Sales[Amount]"]["match"] == "exact"
+    assert rows["Sales[Region]"]["match"] == "exact"  # exact table wins over OTHER
+    assert rows["Sales[Cost]"]["match"].startswith("ambiguous")
+    assert rows["Sales[Total Sales]"]["decision"] == "recreate logic"
+    from openpyxl import load_workbook
+    wb = load_workbook(out / "shopping_list.xlsx")
+    assert wb.sheetnames[:2] == ["Columns to source", "Measures & logic"]

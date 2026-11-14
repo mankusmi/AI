@@ -8,9 +8,12 @@ from pathlib import Path
 
 from .analysis import Analysis
 
-SHOP_COLS = ["priority", "decision", "datapoint", "kind", "data_type", "definition", "also_known_as", "needed_by",
-             "dashboards_replaced", "visuals", "also_used_by_staying", "required_via_measures",
-             "grain", "freshness", "new_system_field", "status", "comments"]
+SHOP_COLS = ["priority", "decision", "datapoint", "kind", "data_type", "suggested_snowflake_type", "definition",
+             "also_known_as", "needed_by", "dashboards_replaced", "visuals", "also_used_by_staying", "required_via_measures",
+             "snowflake_database", "snowflake_schema", "snowflake_table", "snowflake_column", "snowflake_actual_type",
+             "match", "candidates", "grain", "freshness", "status", "comments"]
+LOGIC_COLS = ["priority", "decision", "datapoint", "kind", "definition", "needed_by", "dashboards_replaced", "visuals",
+              "also_used_by_staying", "grain", "freshness", "status", "comments"]
 
 
 def _csv(path: Path, rows: list[dict], cols: list[str]) -> None:
@@ -20,9 +23,10 @@ def _csv(path: Path, rows: list[dict], cols: list[str]) -> None:
         w.writerows(rows)
 
 
-def write_all(a: Analysis, out: Path) -> list[Path]:
+def write_all(a: Analysis, out: Path, shop: list[dict] | None = None) -> list[Path]:
     out.mkdir(parents=True, exist_ok=True)
-    shop, inv, stay = a.shopping_list(), a.inventory(), a.stay_only()
+    shop = a.shopping_list() if shop is None else shop
+    inv, stay = a.inventory(), a.stay_only()
     inv_cols = ["dashboard", "status", "owner", "pages", "visuals", "datapoints", "notes"]
     written = []
     for name, rows, cols in (("shopping_list.csv", shop, SHOP_COLS), ("dashboard_inventory.csv", inv, inv_cols),
@@ -46,9 +50,14 @@ def _xlsx(path: Path, shop, inv, stay, inv_cols):
         from openpyxl.worksheet.datavalidation import DataValidation
     except ImportError:
         return None
+    cols_rows = [r for r in shop if r["kind"] == "column"]
+    logic_rows = [r for r in shop if r["kind"] != "column"]
     wb = Workbook()
-    for ws, rows, cols in ((wb.active, shop, SHOP_COLS), (wb.create_sheet(), inv, inv_cols),
-                           (wb.create_sheet(), stay, ["datapoint", "kind", "used_by"])):
+    sheets = [("Columns to source", cols_rows, SHOP_COLS), ("Measures & logic", logic_rows, LOGIC_COLS),
+              ("Dashboards", inv, inv_cols), ("Stay on legacy", stay, ["datapoint", "kind", "used_by"])]
+    for i, (title, rows, cols) in enumerate(sheets):
+        ws = wb.active if i == 0 else wb.create_sheet()
+        ws.title = title
         ws.append(cols)
         for r in rows:
             ws.append([r.get(c, "") for c in cols])
@@ -57,16 +66,14 @@ def _xlsx(path: Path, shop, inv, stay, inv_cols):
             c.fill = PatternFill("solid", fgColor="305496")
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
-        for i, c in enumerate(cols, start=1):
+        for j, c in enumerate(cols, start=1):
             width = min(60, max([len(c)] + [len(str(r.get(c, ""))) for r in rows[:200]]) + 2)
-            ws.column_dimensions[ws.cell(1, i).column_letter].width = width
-    wb.worksheets[0].title, wb.worksheets[1].title, wb.worksheets[2].title = "Shopping list", "Dashboards", "Stay on legacy"
-    ws = wb.worksheets[0]
-    if shop:
-        col = ws.cell(1, SHOP_COLS.index("status") + 1).column_letter
-        dv = DataValidation(type="list", formula1='"open,requested,mapped,confirmed,not available"', allow_blank=True)
-        ws.add_data_validation(dv)
-        dv.add(f"{col}2:{col}{len(shop) + 1}")
+            ws.column_dimensions[ws.cell(1, j).column_letter].width = width
+        if "status" in cols and rows:
+            col = ws.cell(1, cols.index("status") + 1).column_letter
+            dv = DataValidation(type="list", formula1='"open,requested,mapped,confirmed,not available"', allow_blank=True)
+            ws.add_data_validation(dv)
+            dv.add(f"{col}2:{col}{len(rows) + 1}")
     wb.save(path)
     return path
 

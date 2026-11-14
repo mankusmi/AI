@@ -18,7 +18,21 @@ Priority: High = 3+ replaced dashboards, Medium = 2, Low = 1.
 
 `--aliases`: CSV `datapoint,canonical` (e.g. `Sales[Net Rev],Sales[Revenue]`) merges differently named datapoints into one row.
 
-Output: `shopping_list.xlsx/.csv/.html` (send to the vendor; they fill `new_system_field`, `status`, `comments`; grain/freshness are left for you),
+**Snowflake pre-match (optional).** Export the catalog once and pass it in:
+
+```sql
+SELECT table_catalog, table_schema, table_name, column_name, data_type
+FROM <db>.information_schema.columns WHERE table_schema <> 'INFORMATION_SCHEMA';
+```
+```bash
+pbi-migrate build -m dashboards.csv -o out --snowflake-columns columns.csv
+```
+Columns are matched by normalised name; the table name breaks ties. `match` is `exact`, `column only`, `ambiguous (n)` (see `candidates`) or `none`.
+These are suggestions to verify, not mappings.
+
+Output: `shopping_list.xlsx` (sheets: *Columns to source*, *Measures & logic*, *Dashboards*, *Stay on legacy*; `status` has a dropdown), plus
+`.csv`/`.html`. Columns carry a suggested Snowflake type; measures and calculated columns are marked `recreate logic` (rebuild in the
+repointed model or a Snowflake view) and their underlying columns appear on the columns sheet. grain/freshness are left for you,
 `dashboard_inventory.csv`, `stay_on_legacy.csv`, `analysis.json`.
 
 Limits: report-level/page filters and slicer selections are not captured; hidden visuals are counted.
