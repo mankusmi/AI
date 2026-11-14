@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from .lineage import build_lineage, lineage_html, lineage_markdown, lineage_svg
+from .lineage import build_lineage, lineage_html, lineage_markdown, lineage_svg, LINEAGE_CSS, LINEAGE_JS
 from .store import slug
 
 
@@ -145,7 +145,7 @@ def summary_html(snapshot: dict, analysis: dict) -> str:
     g = build_lineage(snapshot, analysis)
     if g["nodes"]:
         P.append("<h2>Lineage</h2><p class='mut'>Sources \u2192 dataflows (run order) \u2192 datasets \u2192 reports. "
-                 "Also available standalone as lineage.html.</p><div class='wrap'>" + lineage_svg(g) + "</div>")
+                 "Click a node to highlight its upstream and downstream. Also available standalone as lineage.html.</p><div class='wrap'>" + lineage_svg(g) + "</div>")
     P.append("<h2>What each dataflow does</h2>")
     for r in analysis["flows"]:
         ent = [(x["name"], x["kind"], x["columns"], x["last_refresh"] or "") for x in r["entities"]]
@@ -161,7 +161,7 @@ def summary_html(snapshot: dict, analysis: dict) -> str:
     if analysis["warnings"]:
         P.append("<h2>Warnings</h2><ul class='warn'>" + "".join(f"<li>{e(w)}</li>" for w in analysis["warnings"]) + "</ul>")
     return (f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-            f"<title>Workspace summary</title><style>{_CSS}</style></head><body><main>{''.join(P)}</main></body></html>")
+            f"<title>Workspace summary</title><style>{_CSS}{LINEAGE_CSS}</style></head><body><main>{''.join(P)}</main><script>{LINEAGE_JS}</script></body></html>")
 
 
 def write_docs(out: Path, snapshot: dict, analysis: dict) -> None:

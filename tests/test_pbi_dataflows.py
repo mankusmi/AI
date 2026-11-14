@@ -110,6 +110,7 @@ def test_lineage_graph_and_outputs(tmp_path):
     edges = {(labels[a], labels[b]) for a, b in g["edges"]}
     assert {("SQL Server", "Raw"), ("Raw", "Clean"), ("Clean", "Agg"), ("Agg", "Model"), ("Model", "Sales Report")} <= edges
     assert "flowchart LR" in lineage_markdown(snap, analyze(snap)) and "<svg" in lineage_html(snap, analyze(snap))
+    assert "data-from=" in lineage_html(snap, analyze(snap)) and "addEventListener" in lineage_html(snap, analyze(snap))
 
 
 def test_cli_writes_lineage(tmp_path, monkeypatch):
