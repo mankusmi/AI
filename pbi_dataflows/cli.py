@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:  # noqa: BLE001 - CLI boundary: show a message, not a traceback
         print(f"error: {e}", file=sys.stderr)
         return 2
-    print(f"{len(analysis['flows'])} dataflow(s) -> {out}  (open {out / 'summary.html'})")
+    print(f"{len(analysis['flows'])} dataflow(s) -> {out}  (open {out / 'lineage.html'} for lineage, {out / 'summary.html'} for docs)")
     for w in analysis["warnings"]:
         print(f"warning: {w}", file=sys.stderr)
     return 0

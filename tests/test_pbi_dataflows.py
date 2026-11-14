@@ -99,3 +99,21 @@ def test_cli_roundtrip(tmp_path, monkeypatch):
     assert len(list((out / "docs").iterdir())) == 3
     assert load_snapshot(out)["dataflows"][0]["definition"]["name"] == "Raw"
     assert main(["document", str(out)]) == 0
+
+
+def test_lineage_graph_and_outputs(tmp_path):
+    from pbi_dataflows.lineage import build_lineage, lineage_html, lineage_markdown
+    snap = snapshot()
+    snap["objects"]["reports"] = [{"id": "r1", "name": "Sales Report", "datasetId": "d1"}]
+    g = build_lineage(snap, analyze(snap))
+    labels = {n["id"]: n["label"] for n in g["nodes"]}
+    edges = {(labels[a], labels[b]) for a, b in g["edges"]}
+    assert {("SQL Server", "Raw"), ("Raw", "Clean"), ("Clean", "Agg"), ("Agg", "Model"), ("Model", "Sales Report")} <= edges
+    assert "flowchart LR" in lineage_markdown(snap, analyze(snap)) and "<svg" in lineage_html(snap, analyze(snap))
+
+
+def test_cli_writes_lineage(tmp_path, monkeypatch):
+    import pbi_dataflows.client as c
+    monkeypatch.setattr(c, "DataflowClient", lambda tp: DataflowClient(tp, session=FakeSession()))
+    assert main(["fetch", "--workspace-id", WS, "--token", "x", "-o", str(tmp_path)]) == 0
+    assert (tmp_path / "Sales_WS" / "lineage.html").exists() and (tmp_path / "Sales_WS" / "LINEAGE.md").exists()

@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
+from .lineage import lineage_html, lineage_markdown
 from .store import slug
 
 
@@ -172,3 +173,5 @@ def write_docs(out: Path, snapshot: dict, analysis: dict) -> None:
         (docs / doc_names[r["id"]]).write_text(dataflow_markdown(r, names, flows[r["id"]]), encoding="utf-8")
     (out / "SUMMARY.md").write_text(summary_markdown(snapshot, analysis, doc_names), encoding="utf-8")
     (out / "summary.html").write_text(summary_html(snapshot, analysis), encoding="utf-8")
+    (out / "lineage.html").write_text(lineage_html(snapshot, analysis), encoding="utf-8")
+    (out / "LINEAGE.md").write_text(lineage_markdown(snapshot, analysis), encoding="utf-8")
