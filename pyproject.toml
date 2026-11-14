@@ -25,9 +25,10 @@ pbi-dataflows = "pbi_dataflows.cli:main"
 devops-plan = "devops_planner.cli:main"
 devops-triage = "devops_planner.triage_cli:main"
 devops-report = "devops_planner.report_cli:main"
+pbi-migrate = "migration_planner.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["pbi_profiler*", "pbi_dataflows*", "sp_profiler*", "devops_planner*"]
+include = ["pbi_profiler*", "pbi_dataflows*", "sp_profiler*", "devops_planner*", "migration_planner*"]
 
 [tool.setuptools.package-data]
 sp_profiler = ["web/*.html"]
