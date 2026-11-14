@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-from .lineage import lineage_html, lineage_markdown
+from .lineage import build_lineage, lineage_html, lineage_markdown, lineage_svg
 from .store import slug
 
 
@@ -142,6 +142,10 @@ def summary_html(snapshot: dict, analysis: dict) -> str:
         (r["order"], r["name"], ", ".join(names[d] for d in r["depends_on"]) or "-",
          ", ".join([names[d] for d in r["downstream"]] + r["datasets"]) or "-", r["last_success"] or "-", r["last_status"] or "-")
         for r in analysis["flows"]]))
+    g = build_lineage(snapshot, analysis)
+    if g["nodes"]:
+        P.append("<h2>Lineage</h2><p class='mut'>Sources \u2192 dataflows (run order) \u2192 datasets \u2192 reports. "
+                 "Also available standalone as lineage.html.</p><div class='wrap'>" + lineage_svg(g) + "</div>")
     P.append("<h2>What each dataflow does</h2>")
     for r in analysis["flows"]:
         ent = [(x["name"], x["kind"], x["columns"], x["last_refresh"] or "") for x in r["entities"]]

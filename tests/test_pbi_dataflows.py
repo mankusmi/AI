@@ -116,4 +116,5 @@ def test_cli_writes_lineage(tmp_path, monkeypatch):
     import pbi_dataflows.client as c
     monkeypatch.setattr(c, "DataflowClient", lambda tp: DataflowClient(tp, session=FakeSession()))
     assert main(["fetch", "--workspace-id", WS, "--token", "x", "-o", str(tmp_path)]) == 0
+    assert "<h2>Lineage</h2>" in (tmp_path / "Sales_WS" / "summary.html").read_text()
     assert (tmp_path / "Sales_WS" / "lineage.html").exists() and (tmp_path / "Sales_WS" / "LINEAGE.md").exists()
