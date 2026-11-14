@@ -64,3 +64,31 @@ def test_snowflake_catalog_matching_and_xlsx(tmp_path):
     from openpyxl import load_workbook
     wb = load_workbook(out / "shopping_list.xlsx")
     assert wb.sheetnames[:2] == ["Columns to source", "Measures & logic"]
+
+
+def test_scan_pbip_folder(tmp_path):
+    import json
+    import shutil
+    proj = tmp_path / "proj"
+    shutil.copytree(PBIR_SAMPLE, proj / "Sales.Report")
+    shutil.copytree(TMDL_SAMPLE, proj / "Sales.SemanticModel")
+    (proj / "Sales.Report" / "definition.pbir").write_text(
+        json.dumps({"datasetReference": {"byPath": {"path": "../Sales.SemanticModel"}}}))
+    live = proj / "Live.Report"
+    shutil.copytree(PBIR_SAMPLE, live)
+    (live / "definition.pbir").write_text(json.dumps({"datasetReference": {"byConnection": {"connectionString": "x"}}}))
+    mf = tmp_path / "dashboards.csv"
+    assert main(["scan", str(proj), "-o", str(mf)]) == 0
+    with mf.open() as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["dashboard"] for r in rows] == ["Sales"]  # live-connected one skipped with warning
+    assert rows[0]["report_source"] == "pbir" and rows[0]["model_source"] == "tmdl"
+    import pytest
+    with pytest.raises(ValueError, match="fill in the status"):
+        load_manifest(mf)
+    rows[0]["status"] = "replace"
+    with mf.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    assert analyze(load_manifest(mf)).shopping_list()

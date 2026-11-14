@@ -8,6 +8,7 @@ from pathlib import Path
 from .analysis import analyze
 from .manifest import load_aliases, load_manifest, write_template
 from .render import write_all
+from .scan import scan, write_manifest
 from .snowflake import apply_catalog, load_catalog
 
 
@@ -16,6 +17,9 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("init", help="write a template dashboards.csv manifest")
     t.add_argument("path", nargs="?", default="dashboards.csv")
+    sc = sub.add_parser("scan", help="find Power BI Projects (.Report + .SemanticModel) under a folder and write a manifest")
+    sc.add_argument("root")
+    sc.add_argument("-o", "--output", default="dashboards.csv")
     b = sub.add_parser("build", help="analyse the manifest and write the shopping list")
     b.add_argument("-m", "--manifest", required=True)
     b.add_argument("-o", "--output", default="migration_output")
@@ -29,6 +33,16 @@ def main(argv=None) -> int:
             return 1
         write_template(args.path)
         print(f"wrote {args.path}")
+        return 0
+    if args.cmd == "scan":
+        found, warnings = scan(args.root)
+        for w in warnings:
+            print(f"warning: {w}", file=sys.stderr)
+        if not found:
+            print("no usable Power BI projects found", file=sys.stderr)
+            return 1
+        write_manifest(found, args.output, args.root)
+        print(f"wrote {args.output}: {len(found)} dashboards. Fill in the 'status' column (stay | replace | retire).")
         return 0
     try:
         entries = load_manifest(args.manifest)

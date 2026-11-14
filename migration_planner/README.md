@@ -3,10 +3,14 @@
 Turns legacy Power BI dashboards into a **shopping list of datapoints** to request from a replacement system.
 
 ```bash
-pbi-migrate init dashboards.csv          # template manifest
+pbi-migrate scan path/to/projects -o dashboards.csv   # finds every *.Report + its *.SemanticModel (PBIP)
+# or: pbi-migrate init dashboards.csv                 # blank template
 # edit it: one row per dashboard, status = stay | replace | retire
 pbi-migrate build -m dashboards.csv -o out [--aliases aliases.csv]
 ```
+
+`scan` reads each report's `definition.pbir` to find its model, writes the manifest with `status` blank for you to fill in, and warns about
+reports it skips (live-connected to a published model, or no TMDL/BIM next to it). `report.json` (older PBIP report format) is picked up as `legacy-layout`; that path is untested on real files.
 
 Manifest columns: `dashboard, status, report_source (pbir|legacy-layout), report_path, model_source (tmdl|bim), model_path, owner, notes`.
 Relative paths resolve against the manifest's folder.

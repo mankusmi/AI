@@ -39,7 +39,8 @@ def load_manifest(path: str | Path) -> list[DashboardEntry]:
                 continue
             status = row["status"].lower()
             if status not in STATUSES:
-                raise ValueError(f"manifest line {n}: status {row['status']!r} must be one of {STATUSES}")
+                raise ValueError(f"manifest line {n} ({row['dashboard']}): status {row['status']!r} must be one of {STATUSES}"
+                                 + (" -- fill in the status column" if not status else ""))
             if row["report_source"] not in REPORT_SOURCES:
                 raise ValueError(f"manifest line {n}: report_source must be one of {REPORT_SOURCES}")
             if row["model_source"] not in MODEL_SOURCES:
